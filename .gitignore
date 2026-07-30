@@ -1,0 +1,17 @@
+# Python、uv 與測試暫存檔不屬於可重現分析的原始碼。
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# SERVER 或本機的大型快取與 SVD/EOF 衍生陣列都由流程重建，不應納入版本控制。
+outputs/
+derived/
+data/
+
+# macOS Finder 產生的中介檔與研究程式無關。
+.DS_Store
+# temp。
+tmp/

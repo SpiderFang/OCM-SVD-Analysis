@@ -1,0 +1,33 @@
+[build-system]
+# 使用 setuptools 建立可安裝套件，讓 SERVER 與本機都能以相同 CLI 執行，避免依賴目前工作目錄。
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocm-svd-analysis"
+version = "0.1.0"
+description = "CWA-OCM surface cache 的 SVD 分析管線"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.9",
+    "numpy>=2.0",
+    "threadpoolctl>=3.5",
+]
+
+[project.scripts]
+# CLI 名稱保留 SVD，與研究團隊慣用術語及輸出目錄保持一致。
+ocm-svd = "ocm_svd_analysis.cli:main"
+ocm-svd-batch = "ocm_svd_analysis.batch_cli:main"
+ocm-svd-replot = "ocm_svd_analysis.replot_cli:main"
+ocm-svd-replot-batch = "ocm_svd_analysis.replot_batch_cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.unittest]
+# 本專案以標準函式庫 unittest 執行科學基準測試，不另外引入測試框架依賴。
+start-directory = "tests"
