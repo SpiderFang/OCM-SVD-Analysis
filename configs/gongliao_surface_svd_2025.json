@@ -48,7 +48,12 @@
     "policy": "每區先以 4 個 I/O worker 平行讀取不同月份的小窗；I/O 完成後以 4 個受控 BLAS 執行緒計算。六區批次最多同時執行 6 區，最高 24 個 BLAS 核心，適合至少配置 32 核的 SERVER。"
   },
   "figures": {
+    "style": "academic_report_ready_v6",
     "mode_count": 5,
-    "max_quiver_arrows_per_axis": 16
+    "max_quiver_arrows_per_axis": 16,
+    "output_formats": ["png", "svg"],
+    "raster_dpi": 300,
+    "coastline_geojson": "OCM-Data-Preprocessing/data/coastline/osm_land_polygons_taiwan_v1.geojson",
+    "coastline_geojson_sha256": "9e2e0ac9bc527aca87d89332cd428fdcb776eefbf94a85dd70f887f729b95fdd"
   }
 }

@@ -1,4 +1,4 @@
-"""從既有 SVD 科學 run 重繪乾淨圖層，不重新讀資料或求解 SVD。"""
+"""從既有 SVD 科學 run 重繪白底完整標示報告圖，不重新讀資料或求解 SVD。"""
 
 from __future__ import annotations
 
@@ -40,4 +40,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

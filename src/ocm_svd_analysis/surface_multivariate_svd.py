@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 from threadpoolctl import threadpool_limits
@@ -105,7 +105,9 @@ class AnalysisConfig:
     figure_style: str
     figure_formats: tuple[str, ...]
     figure_dpi: int
-    figure_transparent_background: bool
+    figure_land_overlay_path: Path
+    figure_land_overlay_logical_path: str
+    figure_land_overlay_sha256: str
 
 
 @dataclass(frozen=True)
@@ -251,6 +253,52 @@ def _canonical_json_hash(payload: object) -> str:
 
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _sha256_file_content(path: Path) -> str:
+    """串流計算外部資料檔 SHA-256，避免一次把大型岸線 GeoJSON 再複製到記憶體。
+
+    此雜湊用來鎖定報告圖採用的岸線版本；它只驗證圖資位元內容，不代表岸線會參與
+    SVD 遮罩、權重或任何統計計算。
+    """
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _resolve_workspace_data_path(config_path: Path, logical_path: str) -> Path:
+    """在本機與 SERVER 的共同 workspace 結構中解析版本化外部資料。
+
+    `logical_path` 建議使用 `OCM-Data-Preprocessing/...` 這類不含使用者家目錄的路徑。
+    搜尋會由設定檔、目前工作目錄與本模組位置逐層往上，讓同一份 JSON 可在 macOS
+    `/Users/.../Workspace` 與 SERVER `/home/.../Workspace` 使用。回傳前必須確認是檔案；
+    找不到時立即失敗，不能悄悄退回沒有海岸線的圖，否則六區報告會出現版式不一致。
+    """
+
+    raw_path = Path(logical_path)
+    if raw_path.is_absolute():
+        resolved = raw_path.resolve()
+        if resolved.is_file():
+            return resolved
+        raise FileNotFoundError(f"設定指定的外部資料不存在: {resolved}")
+
+    searched: list[Path] = []
+    seen: set[Path] = set()
+    anchors = (config_path.resolve().parent, Path.cwd().resolve(), Path(__file__).resolve().parent)
+    for anchor in anchors:
+        for root in (anchor, *anchor.parents):
+            candidate = (root / raw_path).resolve()
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            searched.append(candidate)
+            if candidate.is_file():
+                return candidate
+    preview = ", ".join(str(path) for path in searched[:8])
+    raise FileNotFoundError(f"找不到 figures.coastline_geojson={logical_path}；已搜尋: {preview}")
 
 
 def _as_float(value: object, field: str) -> float:
@@ -483,8 +531,15 @@ def load_analysis_config(config_path: Path) -> AnalysisConfig:
     figure_config = raw.get("figures")
     if not isinstance(figure_config, dict):
         raise ValueError("figures 必須是物件")
-    figure_style = figure_config.get("style", "academic_clean_postproduction_v2")
-    _require(figure_style == "academic_clean_postproduction_v2", "figures.style 目前必須是 academic_clean_postproduction_v2")
+    # 正式流程只允許輸出白底、完整標示的報告圖。舊版無文字透明素材已由專案移除，
+    # 因為圖檔一旦脫離 sidecar 就無法判斷變數、單位、模態或研究範圍，容易被誤用。
+    # v5 另加入版本化高解析岸線並移除容易被誤認為測站的 anchor 記號。style 只影響
+    # figure bundle，不進入重繪器的科學設定雜湊，因此切換不會重新求解 SVD。
+    figure_style = figure_config.get("style", "academic_report_ready_v6")
+    _require(
+        figure_style == "academic_report_ready_v6",
+        "figures.style 只允許 academic_report_ready_v6，以確保獨立向量比例尺、明確邊界與版本化岸線",
+    )
     figure_formats_raw = figure_config.get("output_formats", ["png"])
     if not isinstance(figure_formats_raw, list) or not figure_formats_raw:
         raise ValueError("figures.output_formats 必須是非空白清單")
@@ -493,9 +548,22 @@ def load_analysis_config(config_path: Path) -> AnalysisConfig:
         "figures.output_formats 目前只允許 png 與 svg",
     )
     _require(len(figure_formats_raw) == len(set(figure_formats_raw)), "figures.output_formats 不可重複")
-    figure_transparent_background = figure_config.get("transparent_background", True)
-    _require(isinstance(figure_transparent_background, bool), "figures.transparent_background 必須是布林值")
-
+    coastline_logical_path = figure_config.get("coastline_geojson")
+    coastline_sha256 = figure_config.get("coastline_geojson_sha256")
+    if not isinstance(coastline_logical_path, str) or not coastline_logical_path.strip():
+        raise ValueError("figures.coastline_geojson 必須是非空白路徑")
+    if not isinstance(coastline_sha256, str):
+        raise ValueError("figures.coastline_geojson_sha256 必須是小寫 SHA-256")
+    _require(
+        len(coastline_sha256) == 64
+        and all(character in "0123456789abcdef" for character in coastline_sha256),
+        "figures.coastline_geojson_sha256 必須是 64 字元小寫十六進位",
+    )
+    coastline_path = _resolve_workspace_data_path(config_path, coastline_logical_path)
+    _require(
+        _sha256_file_content(coastline_path) == coastline_sha256,
+        "figures.coastline_geojson 內容與設定 SHA-256 不符；必須更新版本與 provenance 後才能產圖",
+    )
     return AnalysisConfig(
         raw=raw,
         analysis_label=label,
@@ -529,7 +597,9 @@ def load_analysis_config(config_path: Path) -> AnalysisConfig:
         figure_style=figure_style,
         figure_formats=tuple(figure_formats_raw),
         figure_dpi=_as_positive_int(figure_config.get("raster_dpi", 180), "figures.raster_dpi"),
-        figure_transparent_background=figure_transparent_background,
+        figure_land_overlay_path=coastline_path,
+        figure_land_overlay_logical_path=coastline_logical_path,
+        figure_land_overlay_sha256=coastline_sha256,
     )
 
 
@@ -1126,6 +1196,210 @@ def _configured_year_label(config: AnalysisConfig) -> str:
     return "+".join(str(year) for year in config.years)
 
 
+def _ring_to_lonlat_array(raw_ring: object) -> np.ndarray | None:
+    """把 GeoJSON ring 轉成有限的 WGS84 `(point, lon/lat)` 陣列。
+
+    GeoJSON 可能附帶第三維高程，本表層報告只取前兩欄。少於三個不同頂點、維度錯誤、
+    超出合法經緯度或含非有限值的 ring 會被忽略；外部岸線局部壞點不應讓 Matplotlib
+    產生外觀正常但投影位置錯誤的陸地。
+    """
+
+    ring = np.asarray(raw_ring, dtype=np.float64)
+    if ring.ndim != 2 or ring.shape[0] < 4 or ring.shape[1] < 2:
+        return None
+    lonlat = ring[:, :2]
+    if (
+        not np.isfinite(lonlat).all()
+        or np.any((lonlat[:, 0] < -180.0) | (lonlat[:, 0] > 180.0))
+        or np.any((lonlat[:, 1] < -90.0) | (lonlat[:, 1] > 90.0))
+    ):
+        return None
+    if not np.allclose(lonlat[0], lonlat[-1]):
+        lonlat = np.vstack((lonlat, lonlat[0]))
+    return lonlat
+
+
+def _iter_geojson_polygon_rings(geometry: dict[str, Any] | None) -> Iterable[tuple[np.ndarray, ...]]:
+    """逐一產生 GeoJSON Polygon/MultiPolygon 的外環與洞環。
+
+    每次回傳的 tuple 第一個 ring 是陸地外環，其餘是內部水域洞環。保留洞環可避免
+    高解析 OSM land polygons 中的港池、潟湖或其它水域被錯填為陸地；輸入同時接受
+    FeatureCollection、Feature 與 GeometryCollection，方便日後更換同格式圖資。
+    """
+
+    if not geometry:
+        return
+    kind = geometry.get("type")
+    if kind == "FeatureCollection":
+        for feature in geometry.get("features", []):
+            if isinstance(feature, dict):
+                yield from _iter_geojson_polygon_rings(feature)
+        return
+    if kind == "Feature":
+        nested = geometry.get("geometry")
+        if isinstance(nested, dict):
+            yield from _iter_geojson_polygon_rings(nested)
+        return
+    if kind == "GeometryCollection":
+        for nested in geometry.get("geometries", []):
+            if isinstance(nested, dict):
+                yield from _iter_geojson_polygon_rings(nested)
+        return
+    polygons = (
+        geometry.get("coordinates", [])
+        if kind == "MultiPolygon"
+        else [geometry.get("coordinates", [])]
+        if kind == "Polygon"
+        else []
+    )
+    for polygon in polygons:
+        converted = tuple(
+            ring
+            for raw_ring in polygon
+            if (ring := _ring_to_lonlat_array(raw_ring)) is not None
+        )
+        if converted:
+            yield converted
+
+
+def _load_geojson_land_polygons(path: Path) -> tuple[tuple[np.ndarray, ...], ...]:
+    """讀取只供圖面使用的版本化陸地多邊形。
+
+    輸出不會 rasterize、覆寫 `valid_mask.npy` 或改變 SVD 狀態向量；它只在所有海洋
+    資料圖層上方提供高解析地理參照。若檔案沒有任何可用 polygon，立即停止產圖，
+    防止使用者以為已套用岸線，實際卻得到空白底圖。
+    """
+
+    payload = _read_json_object(path)
+    polygons = tuple(_iter_geojson_polygon_rings(payload))
+    _require(bool(polygons), f"岸線 GeoJSON 沒有可用 Polygon/MultiPolygon: {path}")
+    return polygons
+
+
+def _clip_polygon_ring_to_extent(
+    ring: np.ndarray,
+    extent: tuple[float, float, float, float],
+) -> np.ndarray | None:
+    """以 Sutherland–Hodgman 將單一 ring 裁到局地經緯度矩形。
+
+    OSM 台灣本島外環含數萬個頂點；若原樣寫入每張 SVG，即使圖面只看 0.15° bbox，
+    檔案仍會攜帶整座台灣岸線。矩形裁切保留 bbox 內原始高解析頂點與必要交點，
+    同時降低六區多模態 SVG 大小。此函式只改變繪圖幾何，不改動來源 GeoJSON。
+    """
+
+    lon_min, lon_max, lat_min, lat_max = extent
+    vertices = [np.asarray(point, dtype=np.float64) for point in ring[:-1]]
+
+    def clip_boundary(
+        points: list[np.ndarray],
+        inside: Any,
+        intersect: Any,
+    ) -> list[np.ndarray]:
+        """將目前 polygon 頂點依單一矩形邊界裁切並插入交點。"""
+
+        if not points:
+            return []
+        output: list[np.ndarray] = []
+        previous = points[-1]
+        previous_inside = bool(inside(previous))
+        for current in points:
+            current_inside = bool(inside(current))
+            if current_inside:
+                if not previous_inside:
+                    output.append(intersect(previous, current))
+                output.append(current)
+            elif previous_inside:
+                output.append(intersect(previous, current))
+            previous = current
+            previous_inside = current_inside
+        return output
+
+    def vertical_intersection(start: np.ndarray, stop: np.ndarray, longitude: float) -> np.ndarray:
+        """求線段與固定經度邊界交點；垂直退化線段沿用起點緯度。"""
+
+        delta = stop - start
+        fraction = 0.0 if abs(float(delta[0])) < 1.0e-15 else (longitude - float(start[0])) / float(delta[0])
+        return np.array([longitude, float(start[1] + fraction * delta[1])], dtype=np.float64)
+
+    def horizontal_intersection(start: np.ndarray, stop: np.ndarray, latitude: float) -> np.ndarray:
+        """求線段與固定緯度邊界交點；水平退化線段沿用起點經度。"""
+
+        delta = stop - start
+        fraction = 0.0 if abs(float(delta[1])) < 1.0e-15 else (latitude - float(start[1])) / float(delta[1])
+        return np.array([float(start[0] + fraction * delta[0]), latitude], dtype=np.float64)
+
+    vertices = clip_boundary(vertices, lambda point: point[0] >= lon_min, lambda a, b: vertical_intersection(a, b, lon_min))
+    vertices = clip_boundary(vertices, lambda point: point[0] <= lon_max, lambda a, b: vertical_intersection(a, b, lon_max))
+    vertices = clip_boundary(vertices, lambda point: point[1] >= lat_min, lambda a, b: horizontal_intersection(a, b, lat_min))
+    vertices = clip_boundary(vertices, lambda point: point[1] <= lat_max, lambda a, b: horizontal_intersection(a, b, lat_max))
+    if len(vertices) < 3:
+        return None
+    clipped = np.asarray(vertices, dtype=np.float64)
+    return np.vstack((clipped, clipped[0]))
+
+
+def _clip_land_polygons_to_extent(
+    polygons: tuple[tuple[np.ndarray, ...], ...],
+    extent: tuple[float, float, float, float],
+) -> tuple[tuple[np.ndarray, ...], ...]:
+    """篩選並裁切與正式圖面相交的陸地 polygon，保留可用洞環。"""
+
+    lon_min, lon_max, lat_min, lat_max = extent
+    clipped_polygons: list[tuple[np.ndarray, ...]] = []
+    for rings in polygons:
+        exterior = rings[0]
+        overlaps = not (
+            float(np.max(exterior[:, 0])) < lon_min
+            or float(np.min(exterior[:, 0])) > lon_max
+            or float(np.max(exterior[:, 1])) < lat_min
+            or float(np.min(exterior[:, 1])) > lat_max
+        )
+        if not overlaps:
+            continue
+        clipped_exterior = _clip_polygon_ring_to_extent(exterior, extent)
+        if clipped_exterior is None:
+            continue
+        clipped_holes = tuple(
+            clipped
+            for hole in rings[1:]
+            if (clipped := _clip_polygon_ring_to_extent(hole, extent)) is not None
+        )
+        clipped_polygons.append((clipped_exterior, *clipped_holes))
+    _require(bool(clipped_polygons), "指定岸線 GeoJSON 在 analysis bbox 內沒有任何陸地 polygon")
+    return tuple(clipped_polygons)
+
+
+def _resolve_report_font() -> tuple[str, str]:
+    """選擇繁體中文報告字型並回傳字型名稱與檔案 SHA-256。
+
+    字型檔雜湊會進入 figure bundle metadata 的 provenance SHA-256，避免 macOS 與
+    SERVER 使用不同字型卻被誤認為相同位元成果。絕對字型路徑不寫入成果，以免洩漏
+    主機目錄；若只能 fallback 至 DejaVu Sans，仍保留雜湊供 provenance 稽核。
+    """
+
+    import matplotlib.font_manager as font_manager
+
+    available_font_names = {font.name for font in font_manager.fontManager.ttflist}
+    candidates = (
+        "Noto Sans CJK TC",
+        "Noto Sans CJK JP",
+        "PingFang TC",
+        "Heiti TC",
+        "Microsoft JhengHei",
+        "WenQuanYi Zen Hei",
+        "Arial Unicode MS",
+        "DejaVu Sans",
+    )
+    font_name = next((candidate for candidate in candidates if candidate in available_font_names), "DejaVu Sans")
+    font_path = Path(
+        font_manager.findfont(
+            font_manager.FontProperties(family=font_name),
+            fallback_to_default=True,
+        )
+    )
+    return font_name, _sha256_file_content(font_path)
+
+
 def _make_figures(
     output_dir: Path,
     lon: np.ndarray,
@@ -1138,24 +1412,36 @@ def _make_figures(
     explained_variance: np.ndarray,
     config: AnalysisConfig,
 ) -> list[str]:
-    """產生無文字、透明背景且適合學術報告後製的 SVD 圖層。
+    """產生可直接用於簡報與技術報告的白底完整標示圖。
 
     圖面遵循海洋流場 SVD 文獻常見結構：空間模態以 eta 物理回歸幅度作底色、u/v 回歸
     向量疊圖，並為每個模態另輸出標準化 PC 時序；解釋變異另外輸出 scree/cumulative
-    圖。依後製需求，圖內不放標題、座標文字、刻度文字、圖例、色條、anchor 或 EV 註記。
-    所有被移除的單位、色階、箭頭尺度、EV 與來源慣例都寫入 `plot_metadata.json`。
+    圖。正式 `academic_report_ready_v6` 只在 `figures/report/` 產生白底、完整中文
+    解釋變異量、明確經緯度與色階上下限、圖例及版本化高解析海岸線；每張空間圖的
+    向量參考尺另存成同 stem 的 `_vector_scale_transparent` 全透明後製素材；另輸出
+    `_with_vector_scale` 完整備用圖，把參考尺直接畫在主圖右下角。不提供白底獨立
+    比例尺、無文字主圖圖層，也不顯示容易被誤認為測站的 SVD 正負號 anchor。
 
     PC 遇到來源缺日會斷線，不能用直線跨越沒有資料的時段。PNG 供快速預覽，SVG 保留箭頭
-    與曲線向量結構；透明背景方便後續排版軟體另加海岸線、標籤、panel letter 與色條。
+    與曲線向量結構。主圖固定輸出不透明白底；只有檔名明示 `_transparent` 的參考尺
+    素材使用 alpha 背景，內容維持單純黑色箭頭與文字，不加入白底或外描邊。
     """
 
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from matplotlib.lines import Line2D
+    from matplotlib.path import Path as MatplotlibPath
+    from matplotlib.patches import PathPatch, Rectangle
+    from matplotlib.ticker import FormatStrFormatter
+    from matplotlib.transforms import Bbox
 
     figure_dir = output_dir / "figures"
     figure_dir.mkdir(parents=True, exist_ok=True)
+    report_figure_dir = figure_dir / "report"
+    report_figure_dir.mkdir(parents=True, exist_ok=True)
     created: list[str] = []
     lon_grid, lat_grid = np.meshgrid(lon, lat)
     step = max(1, int(math.ceil(max(lon.size, lat.size) / config.max_quiver_arrows_per_axis)))
@@ -1175,21 +1461,40 @@ def _make_figures(
     lat_span = plot_lat_max - plot_lat_min
     geographic_aspect = 1.0 / math.cos(math.radians((lat_min + lat_max) / 2.0))
     asset_metadata: dict[str, Any] = {"modes": []}
+    plot_extent = (plot_lon_min, plot_lon_max, plot_lat_min, plot_lat_max)
+    source_land_polygons = _load_geojson_land_polygons(config.figure_land_overlay_path)
+    plot_land_polygons = _clip_land_polygons_to_extent(source_land_polygons, plot_extent)
+    coastline_vertex_count = int(
+        sum(ring.shape[0] for polygon in plot_land_polygons for ring in polygon)
+    )
+    # 字型選擇與檔案雜湊由共用 helper 決定；重繪器會把同一簽章納入 bundle metadata
+    # 的 provenance SHA-256，確保不同作業系統的字型差異不會被誤認為位元相同成果。
+    report_font_name, report_font_sha256 = _resolve_report_font()
+    plt.rcParams.update(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": [report_font_name, "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        }
+    )
 
-    def save_clean_figure(fig: Any, stem: str) -> list[str]:
-        """依設定輸出同一無文字圖層的 PNG/SVG，回傳相對於 run 目錄的路徑。
+    def save_report_figure(fig: Any, stem: str) -> list[str]:
+        """輸出可直接放入簡報／報告的白底 PNG/SVG，並回傳相對路徑。
 
-        `bbox_inches=tight` 與零 padding 會移除後製不需要的空白；SVG 不套 DPI，PNG 則以
-        設定解析度輸出。透明選項同時作用於 figure 與 axes patch，不會留下白色矩形底。
+        圖面必須在深色圖片檢視器、PowerPoint 母片與 PDF 中維持相同白底。小量 padding
+        保留座標、色條及最外側文字，避免 `bbox_inches="tight"` 裁掉單位。
         """
 
         paths: list[str] = []
+        fig.patch.set_facecolor("white")
+        fig.patch.set_alpha(1.0)
         for output_format in config.figure_formats:
-            path = figure_dir / f"{stem}.{output_format}"
+            path = report_figure_dir / f"{stem}.{output_format}"
             save_kwargs: dict[str, Any] = {
                 "bbox_inches": "tight",
-                "pad_inches": 0,
-                "transparent": config.figure_transparent_background,
+                "pad_inches": 0.08,
+                "transparent": False,
+                "facecolor": "white",
             }
             if output_format == "png":
                 save_kwargs["dpi"] = config.figure_dpi
@@ -1199,11 +1504,103 @@ def _make_figures(
             paths.append(relative_path)
         return paths
 
+    def save_vector_scale_asset(
+        main_stem: str,
+        vector_reference: float,
+        vector_unit_label: str,
+        reference_arrow_length_inches: float,
+    ) -> list[str]:
+        """另存完全透明背景的向量參考尺，供 PowerPoint 後製配對使用。
+
+        檔名固定為 `_vector_scale_transparent`，畫布 alpha 為 0，內容只含純黑水平
+        箭頭與實際 q95 物理參考量；不畫白色底板、半透明框或 halo。透明 PNG 在深色
+        圖片檢視器中可能看起來像黑底，但實際 alpha 仍為透明，PowerPoint 疊圖時不會
+        遮住主圖。`reference_arrow_length_inches` 由主圖 q95 quiver 箭頭在 axes 中的
+        實際顯示長度換算而來；只要主圖與 SVG 套用相同縮放倍率，獨立參考箭頭就和
+        主圖資料箭頭保持同一視覺尺度。此資產只改變版面，不改動向量尺度、SVD 陣列
+        或任何科學結果。
+        """
+
+        # 畫布先提供足夠空間計算 artist bbox，輸出時再依箭頭與文字的實際 bounding box
+        # 四周各保留相同 0.035 inch。這沿用 OCM-NetCDF-Visualizer 與
+        # OCM-Data-Preprocessing 的「箭頭緊接東側標籤」結構，但移除固定 30% axes
+        # 底框，避免獨立素材出現左右不對稱的大量透明空白。
+        fig, axis = plt.subplots(figsize=(1.65, 0.32))
+        fig.patch.set_facecolor("none")
+        fig.patch.set_alpha(0.0)
+        axis.set_facecolor("none")
+        axis.patch.set_alpha(0.0)
+        axis.set_xlim(0.0, 1.0)
+        axis.set_ylim(0.0, 1.0)
+        axis.axis("off")
+        axis_width_inches = axis.get_position().width * fig.get_figwidth()
+        _require(axis_width_inches > 0.0, "透明向量參考尺的 axes 寬度必須為正")
+        arrow_start_x = 0.02
+        arrow_end_x = arrow_start_x + reference_arrow_length_inches / axis_width_inches
+        _require(arrow_end_x < 0.45, "透明向量參考尺的箭頭超出預留畫布")
+        arrow_annotation = axis.annotate(
+            "",
+            xy=(arrow_end_x, 0.50),
+            xytext=(arrow_start_x, 0.50),
+            arrowprops={
+                "arrowstyle": "-|>",
+                "color": "black",
+                "linewidth": 1.0,
+                "mutation_scale": 7.0,
+                "shrinkA": 0.0,
+                "shrinkB": 0.0,
+            },
+        )
+        text_artist = axis.text(
+            arrow_end_x + 0.045,
+            0.50,
+            f"{vector_reference:.2f} {vector_unit_label}",
+            ha="left",
+            va="center",
+            fontsize=6.6,
+            color="black",
+        )
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        _require(arrow_annotation.arrow_patch is not None, "透明向量參考尺缺少箭頭 artist")
+        content_bbox_inches = Bbox.union(
+            [
+                arrow_annotation.arrow_patch.get_window_extent(renderer),
+                text_artist.get_window_extent(renderer),
+            ]
+        ).transformed(fig.dpi_scale_trans.inverted())
+        symmetric_padding_inches = 0.035
+        crop_bbox_inches = Bbox.from_extents(
+            content_bbox_inches.x0 - symmetric_padding_inches,
+            content_bbox_inches.y0 - symmetric_padding_inches,
+            content_bbox_inches.x1 + symmetric_padding_inches,
+            content_bbox_inches.y1 + symmetric_padding_inches,
+        )
+        transparent_paths: list[str] = []
+        for output_format in config.figure_formats:
+            transparent_path = (
+                report_figure_dir / f"{main_stem}_vector_scale_transparent.{output_format}"
+            )
+            save_kwargs: dict[str, Any] = {
+                "bbox_inches": crop_bbox_inches,
+                "pad_inches": 0.0,
+                "transparent": True,
+                "facecolor": "none",
+            }
+            if output_format == "png":
+                save_kwargs["dpi"] = config.figure_dpi
+            fig.savefig(transparent_path, **save_kwargs)
+            relative_path = str(transparent_path.relative_to(output_dir))
+            created.append(relative_path)
+            transparent_paths.append(relative_path)
+        plt.close(fig)
+        return transparent_paths
+
     def finite_range(field: np.ndarray) -> tuple[float, float]:
         """取得有限值色階；常數場以極小對稱寬度避免 Matplotlib 出現奇異 normalization。"""
 
         finite = np.asarray(field[np.isfinite(field)], dtype=np.float64)
-        _require(finite.size > 0, "乾淨學術圖的底色欄位至少必須有一個有限值")
+        _require(finite.size > 0, "學術報告圖的底色欄位至少必須有一個有限值")
         lower = float(np.min(finite))
         upper = float(np.max(finite))
         if lower == upper:
@@ -1225,7 +1622,7 @@ def _make_figures(
 
         地圖寬度約 4.5% 作為第 95 百分位向量的顯示長度；比最大值更不易被單一離群箭頭
         壓縮。回傳物理參考量與 Matplotlib `scale_units="xy"` 所需 scale，兩者都寫入
-        sidecar，後製時可建立正式 quiver key。
+        sidecar，並用於另存與主圖同 stem 的正式向量比例尺圖。
         """
 
         magnitude = np.hypot(u_field, v_field)
@@ -1235,40 +1632,22 @@ def _make_figures(
         scale = reference / (0.045 * lon_span)
         return reference, scale
 
-    def add_vector_map(
-        stem: str,
-        color_field: np.ndarray,
+    def sampled_quiver_fields(
         u_field: np.ndarray,
         v_field: np.ndarray,
-        *,
-        cmap: str,
-        color_limits: tuple[float, float],
-    ) -> tuple[list[str], float, float]:
-        """輸出無任何文字的標量底色與向量疊圖，並回傳檔案與箭頭尺度。"""
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """抽取規則箭頭格點並遮蔽邊緣或無效向量。
 
-        reference, scale = vector_scale(u_field, v_field)
-        figure_width = 6.4
-        figure_height = figure_width * (lat_span / lon_span) * geographic_aspect
-        fig, axis = plt.subplots(figsize=(figure_width, figure_height))
-        fig.patch.set_alpha(0.0 if config.figure_transparent_background else 1.0)
-        axis.set_facecolor("none" if config.figure_transparent_background else "white")
-        axis.pcolormesh(
-            lon_grid,
-            lat_grid,
-            np.ma.masked_invalid(color_field),
-            shading="auto",
-            cmap=cmap,
-            vmin=color_limits[0],
-            vmax=color_limits[1],
-        )
+        距邊界 6% 的向量只在圖面層省略以避免箭頭被裁切；完整 u/v 數值仍保留在
+        `.npy`，不會因此改變 SVD 或空間解讀。
+        """
+
         lon_indices = np.arange(0, lon.size, step)
         lat_indices = np.arange(0, lat.size, step)
         quiver_lon = lon_grid[np.ix_(lat_indices, lon_indices)]
         quiver_lat = lat_grid[np.ix_(lat_indices, lon_indices)]
         quiver_u = u_field[np.ix_(lat_indices, lon_indices)]
         quiver_v = v_field[np.ix_(lat_indices, lon_indices)]
-        # 最長箭頭可能略大於第 95 百分位；排除距四邊 6% 內的 anchor，可避免箭頭被 clip，
-        # 也保留足夠內部向量呈現環流結構。底色仍完整覆蓋全部有效 cell。
         edge_margin_lon = lon_span * 0.06
         edge_margin_lat = lat_span * 0.06
         interior = (
@@ -1279,48 +1658,220 @@ def _make_figures(
             & np.isfinite(quiver_u)
             & np.isfinite(quiver_v)
         )
-        axis.quiver(
+        return (
             quiver_lon,
             quiver_lat,
             np.ma.masked_where(~interior, quiver_u),
             np.ma.masked_where(~interior, quiver_v),
+        )
+
+    def add_land_overlay(axis: Any) -> None:
+        """在海洋資料與箭頭上方疊加高解析向量陸地與海岸線。
+
+        陸地採論文海洋圖常見的低彩度暖灰填色，海岸線以深灰細線界定；z-order 高於
+        pcolormesh 與 quiver，可遮住模型格點在陸地上的視覺延伸，但不改動任何輸出
+        `.npy`。每個 polygon 的洞環與外環組成同一 PathPatch，保留 GeoJSON 水域語意。
+        """
+
+        for polygon in plot_land_polygons:
+            vertices: list[np.ndarray] = []
+            codes: list[np.ndarray] = []
+            for ring in polygon:
+                ring_codes = np.full(ring.shape[0], MatplotlibPath.LINETO, dtype=np.uint8)
+                ring_codes[0] = MatplotlibPath.MOVETO
+                ring_codes[-1] = MatplotlibPath.CLOSEPOLY
+                vertices.append(ring)
+                codes.append(ring_codes)
+            path = MatplotlibPath(np.vstack(vertices), np.concatenate(codes))
+            axis.add_patch(
+                PathPatch(
+                    path,
+                    facecolor="#D9D6CF",
+                    edgecolor="#4A4A4A",
+                    linewidth=0.7,
+                    joinstyle="round",
+                    capstyle="round",
+                    zorder=4,
+                    clip_on=True,
+                )
+            )
+
+    def add_report_vector_map(
+        stem: str,
+        color_field: np.ndarray,
+        u_field: np.ndarray,
+        v_field: np.ndarray,
+        *,
+        cmap: str,
+        color_limits: tuple[float, float],
+        vector_reference: float,
+        quiver_scale: float,
+        title: str,
+        colorbar_label: str,
+        vector_unit_label: str,
+    ) -> tuple[list[str], list[str], list[str]]:
+        """建立標準主圖、透明獨立參考尺，以及內嵌參考尺備用主圖。
+
+        `color_field` 對平均圖是平均 eta（m），對模態圖則是每 1 個標準化 PC 的 eta 回歸
+        幅度（m/PC 1σ）；u/v 向量使用相同語意。岸線只作視覺地理參照，來源檔與 SHA-256
+        寫入 sidecar；它不會把 OSM polygon 轉成 SVD analysis mask。主圖不疊向量比例尺，
+        標準主圖不疊參考尺，方便後製；`_vector_scale_transparent` 是完全透明背景的
+        純黑獨立素材。`_with_vector_scale` 則把同一個 q95 參考量直接畫在主圖右下角，
+        作為不需 PowerPoint 手動配對的備用完整圖。備用圖的半透明白色小底板只服務
+        內嵌標示可讀性，不會出現在獨立透明素材。
+        """
+
+        figure_width = 9.0
+        map_height = figure_width * (lat_span / lon_span) * geographic_aspect
+        fig, axis = plt.subplots(figsize=(figure_width, max(6.3, map_height + 1.25)))
+        axis.set_facecolor("white")
+        report_cmap = plt.get_cmap(cmap).with_extremes(bad="#E6E6E6")
+        # NaN 代表陸地、bbox 外 I/O buffer 或共同有效率未通過格點；用中性淺灰明確區分，
+        # 不能讓透明像素在深色背景被誤認成負 loading。
+        scalar = axis.pcolormesh(
+            lon_grid,
+            lat_grid,
+            np.ma.masked_invalid(color_field),
+            shading="auto",
+            cmap=report_cmap,
+            vmin=color_limits[0],
+            vmax=color_limits[1],
+            rasterized=True,
+        )
+        quiver_lon, quiver_lat, quiver_u, quiver_v = sampled_quiver_fields(u_field, v_field)
+        quiver_artist = axis.quiver(
+            quiver_lon,
+            quiver_lat,
+            quiver_u,
+            quiver_v,
             color="black",
             angles="xy",
             scale_units="xy",
-            scale=scale,
+            scale=quiver_scale,
             pivot="mid",
             width=0.0032,
             headwidth=3.2,
             headlength=4.2,
             headaxislength=3.8,
+            zorder=3,
         )
+        # 岸線在箭頭之上，避免近岸格點的箭頭跨到陸地；黃色 anchor 不再顯示，因其只是
+        # SVD 正負號數值慣例而非測站，正式圖保留會造成觀測位置誤讀。
+        add_land_overlay(axis)
         axis.set_xlim(plot_lon_min, plot_lon_max)
         axis.set_ylim(plot_lat_min, plot_lat_max)
         axis.set_aspect(geographic_aspect, adjustable="box")
-        axis.set_axis_off()
-        fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-        paths = save_clean_figure(fig, stem)
+        axis.set_title(title, fontsize=16, pad=18)
+        axis.set_xlabel("經度（°E）", fontsize=12)
+        axis.set_ylabel("緯度（°N）", fontsize=12)
+        # 以含頭含尾的等距刻度明確顯示圖面實際經緯度上下限；相較自動 locator，
+        # 不會因不同 bbox 或 Matplotlib 版本而省略邊界值。三位小數可辨識 OCM 1 km
+        # focus bbox 的邊界，同時避免標籤因過多有效位數互相重疊。
+        longitude_ticks = np.linspace(plot_lon_min, plot_lon_max, 6)
+        latitude_ticks = np.linspace(plot_lat_min, plot_lat_max, 6)
+        axis.set_xticks(longitude_ticks)
+        axis.set_yticks(latitude_ticks)
+        axis.xaxis.set_major_formatter(FormatStrFormatter("%.03f"))
+        axis.yaxis.set_major_formatter(FormatStrFormatter("%.03f"))
+        axis.tick_params(labelsize=10)
+        axis.grid(color="white", linewidth=0.45, alpha=0.35)
+        colorbar = fig.colorbar(scalar, ax=axis, pad=0.025, fraction=0.047)
+        # 色條固定列出包含 vmin、vmax 的五個刻度，確保讀者不必由色塊或自動刻度推測
+        # 上下限。`%.3g` 在一般小數與極小科學記號間自動切換，可跨六區保留有效位數。
+        colorbar_ticks = np.linspace(color_limits[0], color_limits[1], 5)
+        colorbar.set_ticks(colorbar_ticks)
+        colorbar.ax.yaxis.set_major_formatter(FormatStrFormatter("%.3g"))
+        colorbar.update_ticks()
+        colorbar.set_label(colorbar_label, fontsize=11)
+        colorbar.ax.tick_params(labelsize=9)
+        fig.tight_layout()
+        map_paths = save_report_figure(fig, stem)
+
+        # OCM-NetCDF-Visualizer 與 OCM-Data-Preprocessing 都把 quiverkey 固定在 axes
+        # 右下角、使用 labelpos="E"，並以半透明矩形維持跨色階可讀性。本圖沿用相同
+        # 結構，但因 SVD 單位字串較長，使用 26.0%×6.0% 的緊湊矩形與一般字重，
+        # 比上一版右上角 31.5% 寬圓角框更小、更對稱，也不會與標題或色條互相擠壓。
+        key_panel = Rectangle(
+            (0.715, 0.022),
+            0.260,
+            0.060,
+            transform=axis.transAxes,
+            facecolor="#f8fbfc",
+            edgecolor="#4A4A4A",
+            linewidth=0.45,
+            alpha=0.86,
+            zorder=5,
+            clip_on=False,
+        )
+        axis.add_patch(key_panel)
+        axis.quiverkey(
+            quiver_artist,
+            X=0.810,
+            Y=0.050,
+            U=vector_reference,
+            label=f"{vector_reference:.2f} {vector_unit_label}",
+            labelpos="E",
+            labelsep=0.045,
+            coordinates="axes",
+            color="black",
+            fontproperties={"size": 7.2},
+            zorder=6,
+        )
+        embedded_scale_map_paths = save_report_figure(fig, f"{stem}_with_vector_scale")
+        # 主圖 quiver 對 q95 參考量的資料長度固定為 bbox 經度寬度的 4.5%；轉成 inches
+        # 傳給獨立素材，使它與主圖按相同比例縮放時仍能逐箭頭比較。
+        reference_arrow_length_inches = 0.045 * axis.bbox.width / fig.dpi
         plt.close(fig)
-        return paths, reference, scale
+        transparent_scale_paths = save_vector_scale_asset(
+            stem,
+            vector_reference,
+            vector_unit_label,
+            reference_arrow_length_inches,
+        )
+        return map_paths, transparent_scale_paths, embedded_scale_map_paths
 
     mean_color_limits = finite_range(mean_eta)
-    mean_paths, mean_vector_reference, mean_quiver_scale = add_vector_map(
-        "mean_surface_flow_clean",
+    mean_vector_reference, mean_quiver_scale = vector_scale(mean_u, mean_v)
+    (
+        mean_report_paths,
+        mean_vector_scale_transparent_paths,
+        mean_with_vector_scale_paths,
+    ) = add_report_vector_map(
+        "mean_surface_flow_report",
         mean_eta,
         mean_u,
         mean_v,
         cmap="viridis",
         color_limits=mean_color_limits,
+        vector_reference=mean_vector_reference,
+        quiver_scale=mean_quiver_scale,
+        title=f"{config.focus_name_zh}：{_configured_year_label(config)} 全部可得樣本平均海表流與海面高度",
+        colorbar_label="平均海面高度 η（m）",
+        # 比例尺獨立圖使用純文字 `m/s` 而不啟動 Matplotlib mathtext parser；後者在
+        # 六區平行重繪時可能競爭共用 parser cache，且部分本機 CJK 字型缺少上標負號。
+        vector_unit_label="m/s",
     )
     asset_metadata["mean_surface_flow"] = {
-        "files": mean_paths,
+        "report_files": mean_report_paths,
+        "vector_scale_transparent_report_files": mean_vector_scale_transparent_paths,
+        "with_vector_scale_report_files": mean_with_vector_scale_paths,
         "eta_color_map": "viridis",
         "eta_color_limits_m": list(mean_color_limits),
+        "eta_colorbar_ticks_m": np.linspace(mean_color_limits[0], mean_color_limits[1], 5).tolist(),
         "vector_reference_mps_at_95th_percentile": mean_vector_reference,
         "matplotlib_quiver_scale": mean_quiver_scale,
     }
 
     time_datetime = time_utc_ns.astype("datetime64[ns]")
+    report_time_start = time_datetime[0].astype("datetime64[M]")
+    # 右界取最後一個月的最後 1 ns，而不是下一月月初；如此全年 PC 圖會顯示 01–12，
+    # 不會在最右端再出現一個容易被誤認為同年一月的「01」刻度。
+    report_time_stop = (
+        time_datetime[-1].astype("datetime64[M]")
+        + np.timedelta64(1, "M")
+        - np.timedelta64(1, "ns")
+    )
+    report_time_formatter = "%m" if len(config.years) == 1 else "%Y-%m"
     diffs_hours = np.diff(time_utc_ns).astype(np.float64) / 3_600_000_000_000.0
     gap_after_indices = np.where(diffs_hours > config.expected_timestep_hours * 1.5)[0]
     segment_starts = np.concatenate((np.array([0], dtype=int), gap_after_indices + 1))
@@ -1330,17 +1881,25 @@ def _make_figures(
     daily_gap_after_indices = np.where(np.diff(unique_days).astype("timedelta64[D]").astype(np.int64) > 1)[0]
     daily_segment_starts = np.concatenate((np.array([0], dtype=int), daily_gap_after_indices + 1))
     daily_segment_stops = np.concatenate((daily_gap_after_indices + 1, np.array([unique_days.size], dtype=int)))
+    # SERVER 目前使用 Python 3.9，不能使用 Python 3.10 才加入的
+    # `zip(..., strict=True)`。先顯式驗證每段的起訖索引數量一致，再以一般 zip
+    # 配對，既保留 strict 模式原本要防止的靜默截斷檢查，也維持本機與 SERVER
+    # 共用同一套繪圖程式。這些索引只控制 PC 折線在缺測時間處斷開，不會改動樣本值。
+    _require(
+        segment_starts.size == segment_stops.size,
+        "逐時 PC 缺測分段的起點與終點數量不一致",
+    )
+    _require(
+        daily_segment_starts.size == daily_segment_stops.size,
+        "逐日 PC 缺測分段的起點與終點數量不一致",
+    )
     figure_mode_count = min(config.figure_mode_count, visualization.regression_u.shape[0])
     for mode_index in range(figure_mode_count):
         mode_number = mode_index + 1
         eta_limit = symmetric_limit(visualization.regression_eta[mode_index])
-        spatial_paths, vector_reference, quiver_scale = add_vector_map(
-            f"svd_mode_{mode_number:02d}_spatial_clean",
-            visualization.regression_eta[mode_index],
+        vector_reference, quiver_scale = vector_scale(
             visualization.regression_u[mode_index],
             visualization.regression_v[mode_index],
-            cmap="RdBu_r",
-            color_limits=(-eta_limit, eta_limit),
         )
 
         # 淡灰逐時線保留原始高頻結構，黑色日平均線提供全年尺度可讀輪廓；這對應海洋流場
@@ -1351,28 +1910,97 @@ def _make_figures(
             dtype=np.float64,
         )
         pc_limit = max(float(np.max(np.abs(pc_values))), 1.0)
-        fig, axis = plt.subplots(figsize=(10.0, 2.8))
-        fig.patch.set_alpha(0.0 if config.figure_transparent_background else 1.0)
-        axis.set_facecolor("none" if config.figure_transparent_background else "white")
-        axis.axhline(0.0, color="#808080", linewidth=0.55, alpha=0.8)
-        for start, stop in zip(segment_starts, segment_stops, strict=True):
-            axis.plot(time_datetime[start:stop], pc_values[start:stop], color="#6F6F6F", linewidth=0.32, alpha=0.24)
-        for start, stop in zip(daily_segment_starts, daily_segment_stops, strict=True):
-            axis.plot(unique_days[start:stop], daily_values[start:stop], color="black", linewidth=1.05)
-        axis.set_xlim(time_datetime[0], time_datetime[-1])
+        explained_percent = float(explained_variance[mode_index] * 100.0)
+        (
+            report_spatial_paths,
+            report_vector_scale_transparent_paths,
+            report_with_vector_scale_paths,
+        ) = add_report_vector_map(
+            f"svd_mode_{mode_number:02d}_spatial_report",
+            visualization.regression_eta[mode_index],
+            visualization.regression_u[mode_index],
+            visualization.regression_v[mode_index],
+            cmap="RdBu_r",
+            color_limits=(-eta_limit, eta_limit),
+            vector_reference=vector_reference,
+            quiver_scale=quiver_scale,
+            title=(
+                f"{config.focus_name_zh}：SVD 模態 {mode_number}"
+                f"（解釋變異量：{explained_percent:.2f}%）"
+            ),
+            colorbar_label="η 回歸幅度（m / PC 1σ）",
+            vector_unit_label="m/s / PC 1σ",
+        )
+
+        # 報告用 PC 圖保留逐時與逐日兩個時間尺度，並讓缺測斷點維持空白。月份刻度
+        # 固定由 UTC time axis 產生，避免本機時區將月底樣本移到相鄰月份。
+        fig, axis = plt.subplots(figsize=(11.2, 4.0))
+        fig.patch.set_facecolor("white")
+        axis.set_facecolor("white")
+        axis.axhline(0.0, color="#666666", linewidth=0.75, alpha=0.9)
+        for start, stop in zip(segment_starts, segment_stops):
+            axis.plot(
+                time_datetime[start:stop],
+                pc_values[start:stop],
+                color="#8A8A8A",
+                linewidth=0.38,
+                alpha=0.28,
+            )
+        for start, stop in zip(daily_segment_starts, daily_segment_stops):
+            axis.plot(
+                unique_days[start:stop],
+                daily_values[start:stop],
+                color="black",
+                linewidth=1.15,
+            )
+        axis.set_xlim(report_time_start, report_time_stop)
         axis.set_ylim(-pc_limit * 1.04, pc_limit * 1.04)
-        axis.set_axis_off()
-        fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-        pc_paths = save_clean_figure(fig, f"svd_mode_{mode_number:02d}_pc_clean")
+        axis.set_title(
+            (
+                f"{config.focus_name_zh}：模態 {mode_number} 標準化 PC"
+                f"（解釋變異量：{explained_percent:.2f}%）"
+            ),
+            fontsize=15,
+            pad=12,
+        )
+        axis.set_xlabel(f"{_configured_year_label(config)} 年月份（UTC）", fontsize=11)
+        axis.set_ylabel("標準化 PC（σ）", fontsize=11)
+        axis.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+        axis.xaxis.set_major_formatter(mdates.DateFormatter(report_time_formatter))
+        axis.grid(axis="y", color="#D9D9D9", linewidth=0.6, alpha=0.8)
+        # 使用舊版與新版 Matplotlib 都支援的 `ncol`；SERVER 的既有科學環境
+        # 尚未接受較新的 `ncols` 別名。這只控制三個圖例項目橫向排列，不改變
+        # PC 值、時間軸或任何 SVD 計算結果。
+        axis.legend(
+            handles=[
+                Line2D([0], [0], color="#8A8A8A", linewidth=1.0, alpha=0.55, label="逐時 PC"),
+                Line2D([0], [0], color="black", linewidth=1.4, label="逐日平均"),
+                Line2D([0], [0], color="white", linewidth=0, label="缺測處斷線"),
+            ],
+            loc="upper right",
+            ncol=3,
+            frameon=True,
+            facecolor="white",
+            framealpha=0.92,
+        )
+        fig.tight_layout()
+        report_pc_paths = save_report_figure(fig, f"svd_mode_{mode_number:02d}_pc_report")
         plt.close(fig)
         asset_metadata["modes"].append(
             {
                 "mode": mode_number,
                 "explained_variance_fraction": float(explained_variance[mode_index]),
-                "spatial_files": spatial_paths,
-                "pc_files": pc_paths,
+                "report_spatial_files": report_spatial_paths,
+                "vector_scale_transparent_report_files": report_vector_scale_transparent_paths,
+                "with_vector_scale_report_files": report_with_vector_scale_paths,
+                "report_pc_files": report_pc_paths,
                 "eta_color_map": "RdBu_r",
                 "eta_symmetric_color_limit_m_per_pc_standard_deviation": eta_limit,
+                "eta_colorbar_ticks_m_per_pc_standard_deviation": np.linspace(
+                    -eta_limit,
+                    eta_limit,
+                    5,
+                ).tolist(),
                 "vector_reference_mps_per_pc_standard_deviation_at_95th_percentile": vector_reference,
                 "matplotlib_quiver_scale": quiver_scale,
                 "pc_y_symmetric_limit_standard_deviation": pc_limit * 1.04,
@@ -1380,50 +2008,199 @@ def _make_figures(
             }
         )
 
-    fig, axis = plt.subplots(figsize=(8.0, 4.2))
-    fig.patch.set_alpha(0.0 if config.figure_transparent_background else 1.0)
-    axis.set_facecolor("none" if config.figure_transparent_background else "white")
     mode_numbers = np.arange(1, explained_variance.size + 1)
-    axis.bar(mode_numbers, explained_variance * 100.0, width=0.76, color="#2A6F97")
-    axis.plot(mode_numbers, np.cumsum(explained_variance) * 100.0, color="black", linewidth=1.2, marker="o", markersize=3.4)
-    axis.axhline(0.0, color="#808080", linewidth=0.55)
-    axis.set_xlim(0.45, float(mode_numbers[-1]) + 0.55)
-    axis.set_ylim(0.0, 100.0)
-    axis.set_axis_off()
-    fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-    explained_paths = save_clean_figure(fig, "svd_explained_variance_clean")
+    cumulative_percent = np.cumsum(explained_variance) * 100.0
+    individual_percent = explained_variance * 100.0
+    fig, axis = plt.subplots(figsize=(10.0, 5.3))
+    fig.patch.set_facecolor("white")
+    axis.set_facecolor("white")
+    bars = axis.bar(
+        mode_numbers,
+        individual_percent,
+        width=0.72,
+        color="#2A6F97",
+        label="單一模態解釋變異量",
+        zorder=2,
+    )
+    axis.plot(
+        mode_numbers,
+        cumulative_percent,
+        color="#202020",
+        linewidth=1.5,
+        marker="o",
+        markersize=4.2,
+        label="累積解釋變異量",
+        zorder=3,
+    )
+    # 前五模態是正式圖面交付範圍；直接標出完整的解釋變異百分比，可讓簡報讀者
+    # 不必從 y 軸估算，也避免只寫 EV 縮寫而被誤解為其他統計量。
+    for index, bar in enumerate(bars[:figure_mode_count]):
+        axis.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            bar.get_height() + 1.2,
+            f"{individual_percent[index]:.2f}%",
+            ha="center",
+            va="bottom",
+            fontsize=8.5,
+        )
+    for index in sorted({min(1, explained_variance.size - 1), min(4, explained_variance.size - 1)}):
+        axis.annotate(
+            f"累積 {cumulative_percent[index]:.2f}%",
+            xy=(mode_numbers[index], cumulative_percent[index]),
+            xytext=(7, -18 if index == 1 else 10),
+            textcoords="offset points",
+            fontsize=9,
+            color="#202020",
+        )
+    axis.set_title(f"{config.focus_name_zh}：SVD 模態解釋變異", fontsize=15, pad=12)
+    axis.set_xlabel("模態編號", fontsize=11)
+    axis.set_ylabel("解釋變異（%）", fontsize=11)
+    axis.set_xlim(0.35, float(mode_numbers[-1]) + 0.65)
+    axis.set_ylim(0.0, 105.0)
+    axis.set_xticks(mode_numbers)
+    axis.grid(axis="y", color="#D9D9D9", linewidth=0.65, alpha=0.9, zorder=1)
+    axis.legend(loc="center right", frameon=True, facecolor="white", framealpha=0.92)
+    fig.tight_layout()
+    explained_report_paths = save_report_figure(fig, "svd_explained_variance_report")
     plt.close(fig)
     asset_metadata["explained_variance"] = {
-        "files": explained_paths,
+        "report_files": explained_report_paths,
         "individual_fraction": explained_variance.tolist(),
         "cumulative_fraction": np.cumsum(explained_variance).tolist(),
     }
 
+    # 每個 immutable bundle 自帶最小報告指南，避免圖檔脫離專案 README 後又失去
+    # 「顏色／箭頭／PC 如何一起讀」的必要語意。理論樣本數依設定年份與月份計算；
+    # 這是時數覆蓋率，不主張能代表原始來源品質，正式限制仍以 run metadata 為準。
+    import calendar
+
+    expected_time_count = sum(
+        calendar.monthrange(year, month)[1] * int(round(24.0 / config.expected_timestep_hours))
+        for year in config.years
+        for month in config.months
+    )
+    retained_time_count = int(time_utc_ns.size)
+    time_coverage_fraction = retained_time_count / expected_time_count if expected_time_count else float("nan")
+    maximum_gap_hours = float(np.max(diffs_hours)) if diffs_hours.size else 0.0
+    cumulative = np.cumsum(explained_variance)
+    mode_rows = "\n".join(
+        (
+            f"| {mode_index + 1} | {explained_variance[mode_index] * 100.0:.2f}% | "
+            f"{cumulative[mode_index] * 100.0:.2f}% | "
+            f"{asset_metadata['modes'][mode_index]['eta_symmetric_color_limit_m_per_pc_standard_deviation']:.3f} m | "
+            f"{asset_metadata['modes'][mode_index]['vector_reference_mps_per_pc_standard_deviation_at_95th_percentile']:.3f} m s⁻¹ |"
+        )
+        for mode_index in range(figure_mode_count)
+    )
+    report_guide = f"""# SVD 圖表報告指南
+
+本 bundle 的 `report/` 主圖是可直接放入簡報或技術報告的不透明白底完整標示版；
+只有檔名明示 `_vector_scale_transparent` 的向量參考尺是透明後製素材。
+
+## 分析範圍與資料覆蓋
+
+- 區域：{config.focus_name_zh}
+- analysis bbox（lon_min, lon_max, lat_min, lat_max）：{list(config.bbox)}
+- 可得樣本：{retained_time_count:,} / {expected_time_count:,} 小時（{time_coverage_fraction * 100.0:.2f}%）
+- 圖面時間範圍：{_iso_utc_from_ns(int(time_utc_ns[0]))} 至 {_iso_utc_from_ns(int(time_utc_ns[-1]))}
+- 來源時間斷點：{int(gap_after_indices.size)} 個；最大相鄰樣本間隔 {maximum_gap_hours:.1f} 小時
+
+本成果使用設定期間內全部可得樣本。缺測處在 PC 圖中斷線，不跨缺口插值；報告中仍應
+揭露實際覆蓋率與缺口，不能把「年度可得資料」寫成無缺測的完整逐時觀測。
+
+## 地理底圖
+
+- 陸地來源：OSMData land-polygons（OpenStreetMap `natural=coastline` 衍生，ODbL）。
+- 版本化路徑：`{config.figure_land_overlay_logical_path}`
+- SHA-256：`{config.figure_land_overlay_sha256}`
+- 圖中暖灰色為向量陸地、深灰線為海岸線；只提供地理參照，不改變 OCM 1 km 流場、
+  SVD 海域遮罩、權重或統計結果。
+- 圖上不顯示 SVD 正負號參考點，避免被誤認為測站或觀測位置。
+
+## 前五模態
+
+| 模態 | 單一模態解釋變異量 | 累積解釋變異量 | η 對稱色階上限（每 PC 1σ） | 箭頭 q95 參考量（每 PC 1σ） |
+|---:|---:|---:|---:|---:|
+{mode_rows}
+
+## 讀圖規則
+
+1. 空間圖底色是 η 回歸幅度；紅為正、藍為負，單位是 m / PC 1σ。
+2. 黑箭頭是 u/v 回歸向量，單位是 m s⁻¹ / PC 1σ；不是任一時刻的實際流速。
+   標準空間圖不預先疊入向量參考尺。PowerPoint 後製使用同 stem 的
+   `_vector_scale_transparent` SVG；它是全透明背景、純黑箭頭與數值，已依內容緊密
+   對稱裁切，且參考箭頭長度對齊主圖 q95 箭頭。兩張圖以原始尺寸匯入後應先群組，再
+   一起縮放；放在右下角並內縮約 2.5%。若不想手動後製，直接使用同 stem 的
+   `_with_vector_scale` 備用完整圖；該圖已在右下角放入同尺度參考箭頭。
+3. 某時刻單一模態的距平貢獻 = 空間回歸圖樣 × 同模態標準化 PC。
+4. PC 為正時照圖例方向／色號解讀；PC 為負時箭頭與 η 正負全部反轉。
+5. SVD 模態整體乘以 -1 仍是同一解，因此不可脫離 PC 單獨把藍色命名為「下降事件」。
+6. 解釋變異量表示此模態解釋三變數正規化、面積加權總變異的比例，不是流速或海面高度的百分比。
+
+## 報告建議
+
+- 先用 `svd_explained_variance_report` 說明模態保留依據。
+- 每個模態把 `svd_mode_XX_spatial_report` 與 `svd_mode_XX_pc_report` 成對呈現；
+  需要手動疊回主圖時，使用同 stem 的
+  `svd_mode_XX_spatial_report_vector_scale_transparent`；若不後製，改用
+  `svd_mode_XX_spatial_report_with_vector_scale` 備用完整圖。
+- 用空間圖說明「共同變動形態」，再用 PC 說明該形態在全年何時偏正或偏負。
+- 平均流圖是全年平均背景場；SVD 模態是距平變動，兩者不可相加敘述為同一張瞬時流場。
+"""
+    report_guide_path = figure_dir / "REPORT_GUIDE.md"
+    report_guide_path.write_text(report_guide, encoding="utf-8")
+    created.append(str(report_guide_path.relative_to(output_dir)))
+
     plot_metadata = {
-        "schema_name": "ocm_svd_academic_clean_figure_assets",
-        "schema_version": "1.0.0",
+        "schema_name": "ocm_svd_academic_report_ready_figure_assets",
+        # 6.3.0 依相鄰 OCM 專案把內嵌 quiverkey 移至右下角並縮成緊湊矩形；透明
+        # 素材改依 artist bbox 對稱裁切，且箭頭沿用主圖 q95 的實際顯示長度。
+        "schema_version": "6.3.0",
         "style": config.figure_style,
         "text_policy": {
-            "contains_text": False,
-            "removed_elements": [
-                "title",
-                "axis labels",
-                "tick labels",
-                "legend",
-                "color bar",
-                "focus anchor",
-                "panel letters",
-                "mode and explained-variance annotations",
-            ],
-            "purpose": "保留純資料圖層，供報告或論文排版軟體後製。",
+            "assets_contain_text": True,
+            "assets_purpose": "提供白底完整報告主圖、全透明純黑獨立向量參考尺，以及已內嵌同尺度參考尺的備用完整圖。",
         },
         "rendering": {
             "formats": list(config.figure_formats),
             "png_dpi": config.figure_dpi,
-            "transparent_background": config.figure_transparent_background,
+            "report_background": "opaque white",
+            "report_font_name": report_font_name,
+            "report_font_file_sha256": report_font_sha256,
             "analysis_bbox_lon_lat": list(config.bbox),
             "plotted_valid_cell_edge_bbox_lon_lat": [plot_lon_min, plot_lon_max, plot_lat_min, plot_lat_max],
+            "longitude_axis_ticks_degrees_east": np.linspace(plot_lon_min, plot_lon_max, 6).tolist(),
+            "latitude_axis_ticks_degrees_north": np.linspace(plot_lat_min, plot_lat_max, 6).tolist(),
+            "axis_boundary_policy": "first and last visible ticks equal the plotted valid-cell-edge bbox limits",
+            "colorbar_boundary_policy": "first and last visible ticks equal the scalar vmin and vmax",
+            "vector_scale_policy": "standard map has no key; save transparent <main_stem>_vector_scale_transparent plus complete <main_stem>_with_vector_scale backup",
+            "vector_scale_layout": {
+                "transparent_asset_background": "fully transparent alpha",
+                "transparent_asset_content": "plain black arrow and text; no white background, panel, or halo",
+                "transparent_asset_crop": "tight artist bounding box with symmetric 0.035 inch padding",
+                "reference_arrow_display_length_fraction_of_axes_width": 0.045,
+                "embedded_backup_panel": "compact 26.0% by 6.0% light panel at alpha 0.86 inside lower-right axes",
+                "layout_reference_projects": [
+                    "OCM-NetCDF-Visualizer/scripts/visualize_ocm_month.py",
+                    "OCM-Data-Preprocessing/scripts/visualize_ocm_surface_cache.py",
+                ],
+                "recommended_postproduction_scale": "import main and transparent SVG at intrinsic size, then group and resize together",
+                "recommended_anchor": "inside lower right with approximately 2.5% inset",
+            },
             "quiver_grid_stride": step,
+        },
+        "geographic_context": {
+            "land_overlay_source": "OSMData land-polygons derived from OpenStreetMap natural=coastline",
+            "license": "OpenStreetMap data / ODbL; attribution required",
+            "logical_path": config.figure_land_overlay_logical_path,
+            "sha256": config.figure_land_overlay_sha256,
+            "format_and_crs": "GeoJSON Polygon/MultiPolygon; WGS84 longitude/latitude",
+            "source_polygon_count": len(source_land_polygons),
+            "plotted_polygon_count": len(plot_land_polygons),
+            "plotted_vertex_count_after_bbox_clipping": coastline_vertex_count,
+            "land_fill": "#D9D6CF",
+            "coastline_stroke": "#4A4A4A",
+            "semantics": "visual geographic reference only; does not alter SVD masks, arrays, weights, or statistics",
         },
         "spatial_pattern_representation": {
             "pc": "每一模態以樣本標準差 ddof=1 標準化為無因次 PC。",
@@ -1464,10 +2241,16 @@ def _make_figures(
 
 
 def _create_run_id(config: AnalysisConfig, source_months: tuple[SourceMonth, ...]) -> str:
-    """以設定與所有月份 metadata hash 建立穩定 run ID，不把私有 SERVER 路徑放入名稱。"""
+    """以科學設定與月份 metadata hash 建立穩定 run ID。
+
+    `figures` 刻意排除：岸線、DPI 或字型只改變獨立 figure bundle，不應讓完全相同的
+    SVD 陣列取得另一個 science run ID。這也讓 2024 完備後能先完成六區科學 run，再用
+    同一組陣列反覆改善報告版式，而不重算或複製大型結果。
+    """
 
     source_signature = [{"month": item.month_id, "metadata_sha256": item.metadata_sha256} for item in source_months]
-    digest = _canonical_json_hash({"config": config.raw, "source_months": source_signature})[:12]
+    science_config = {key: value for key, value in config.raw.items() if key != "figures"}
+    digest = _canonical_json_hash({"config": science_config, "source_months": source_signature})[:12]
     safe_label = "".join(character if character.isalnum() or character in "-_" else "_" for character in config.analysis_label)
     return f"{safe_label}_{digest}"
 

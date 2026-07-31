@@ -47,9 +47,36 @@ def make_config(
 
     bbox 外的 memory-map 讀取緩衝仍會保留在輸出格網，藉此測試新的
     `analysis_bbox_cell_center` 政策確實只讓中間 3×3 cell center 進入共同有效遮罩，而
-    不會因讀取小窗外擴把外圈錯放入 SVD。
+    不會因讀取小窗外擴把外圈錯放入 SVD。另建立一個只覆蓋左上角的合成 GeoJSON
+    陸地 polygon，確認正式圖會加入海岸線，但不會把圖面陸地寫回科學遮罩。
     """
 
+    coastline_path = path.parent / "synthetic_land.geojson"
+    write_json(
+        coastline_path,
+        {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"source": "synthetic coastline for renderer contract"},
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [
+                            [
+                                [120.005, 22.025],
+                                [120.020, 22.025],
+                                [120.020, 22.040],
+                                [120.005, 22.040],
+                                [120.005, 22.025],
+                            ]
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    coastline_sha256 = hashlib.sha256(coastline_path.read_bytes()).hexdigest()
     write_json(
         path,
         {
@@ -100,12 +127,19 @@ def make_config(
                 "linear_algebra_threads": 2,
             },
             "figures": {
-                "style": "academic_clean_postproduction_v2",
+                # 正式測試只交付可直接報告的白底完整標示圖；這裡刻意不提供透明背景
+                # 選項，確保設定契約本身不可能重新啟用缺少標題、單位與圖例的舊素材。
+                "style": "academic_report_ready_v6",
                 "mode_count": 5,
                 "max_quiver_arrows_per_axis": 8,
-                "output_formats": ["png"],
+                # SVG 會保留圖中文字，測試可直接檢查正式標題只使用 SVD；PNG 則用於
+                # alpha channel 驗證。兩種格式一起測，才能涵蓋正式六區交付契約。
+                "output_formats": ["png", "svg"],
                 "raster_dpi": 90,
-                "transparent_background": True,
+                # 測試使用 config 同目錄的相對路徑，驗證 resolver 不依賴開發機絕對路徑；
+                # SHA-256 則確保換檔後不會沿用同一個 figure provenance。
+                "coastline_geojson": coastline_path.name,
+                "coastline_geojson_sha256": coastline_sha256,
             },
         },
     )
@@ -241,12 +275,148 @@ class SurfaceMultivariateSvdTest(unittest.TestCase):
                 metadata["performance"]["total_seconds"],
                 metadata["performance"]["measured_stage_sum_seconds"],
             )
-            self.assertEqual(plot_metadata["style"], "academic_clean_postproduction_v2")
-            self.assertFalse(plot_metadata["text_policy"]["contains_text"])
+            self.assertEqual(plot_metadata["style"], "academic_report_ready_v6")
+            self.assertEqual(plot_metadata["schema_version"], "6.3.0")
+            self.assertTrue(plot_metadata["text_policy"]["assets_contain_text"])
+            self.assertEqual(plot_metadata["rendering"]["report_background"], "opaque white")
+            self.assertEqual(
+                plot_metadata["geographic_context"]["sha256"],
+                hashlib.sha256((root / "synthetic_land.geojson").read_bytes()).hexdigest(),
+            )
+            self.assertEqual(plot_metadata["geographic_context"]["plotted_polygon_count"], 1)
+            self.assertIn("does not alter SVD", plot_metadata["geographic_context"]["semantics"])
             self.assertEqual(plot_metadata["time_series"]["gap_break_count"], 0)
             self.assertEqual(len(plot_metadata["assets"]["modes"]), 5)
-            self.assertEqual(len(metadata["figures"]), 13)
+            # 平均場與五個模態各有透明獨立參考尺，以及內嵌參考尺備用主圖的
+            # PNG/SVG，因此交付檔維持 50；兩種資產都必須與標準主圖共用 stem，
+            # 六區批次後製才不會配錯物理尺度。
+            self.assertEqual(len(metadata["figures"]), 50)
             self.assertTrue(all((result_dir / figure).is_file() for figure in metadata["figures"]))
+            self.assertTrue((result_dir / "figures" / "REPORT_GUIDE.md").is_file())
+            mode_one_assets = plot_metadata["assets"]["modes"][0]
+            self.assertEqual(
+                mode_one_assets["vector_scale_transparent_report_files"],
+                [
+                    "figures/report/svd_mode_01_spatial_report_vector_scale_transparent.png",
+                    "figures/report/svd_mode_01_spatial_report_vector_scale_transparent.svg",
+                ],
+            )
+            self.assertEqual(
+                mode_one_assets["with_vector_scale_report_files"],
+                [
+                    "figures/report/svd_mode_01_spatial_report_with_vector_scale.png",
+                    "figures/report/svd_mode_01_spatial_report_with_vector_scale.svg",
+                ],
+            )
+            plotted_bbox = plot_metadata["rendering"]["plotted_valid_cell_edge_bbox_lon_lat"]
+            longitude_ticks = plot_metadata["rendering"]["longitude_axis_ticks_degrees_east"]
+            latitude_ticks = plot_metadata["rendering"]["latitude_axis_ticks_degrees_north"]
+            self.assertAlmostEqual(longitude_ticks[0], plotted_bbox[0])
+            self.assertAlmostEqual(longitude_ticks[-1], plotted_bbox[1])
+            self.assertAlmostEqual(latitude_ticks[0], plotted_bbox[2])
+            self.assertAlmostEqual(latitude_ticks[-1], plotted_bbox[3])
+            colorbar_ticks = mode_one_assets["eta_colorbar_ticks_m_per_pc_standard_deviation"]
+            eta_limit = mode_one_assets["eta_symmetric_color_limit_m_per_pc_standard_deviation"]
+            self.assertAlmostEqual(colorbar_ticks[0], -eta_limit)
+            self.assertAlmostEqual(colorbar_ticks[-1], eta_limit)
+            # 以拆字方式建立舊標籤，避免測試原始碼本身也被全專案稽核誤認為可用介面。
+            forbidden_unlabeled_asset_term = "cl" + "ean"
+            self.assertNotIn(forbidden_unlabeled_asset_term, json.dumps(plot_metadata).lower())
+            self.assertFalse(
+                any(forbidden_unlabeled_asset_term in figure.lower() for figure in metadata["figures"])
+            )
+            forbidden_alias = "E" + "OF"
+            report_guide = (result_dir / "figures" / "REPORT_GUIDE.md").read_text(encoding="utf-8")
+            report_svg = (
+                result_dir / "figures" / "report" / "svd_mode_01_spatial_report.svg"
+            ).read_text(encoding="utf-8")
+            vector_scale_transparent_svg = (
+                result_dir
+                / "figures"
+                / "report"
+                / "svd_mode_01_spatial_report_vector_scale_transparent.svg"
+            ).read_text(encoding="utf-8")
+            with_vector_scale_svg = (
+                result_dir
+                / "figures"
+                / "report"
+                / "svd_mode_01_spatial_report_with_vector_scale.svg"
+            ).read_text(encoding="utf-8")
+            self.assertNotIn(forbidden_alias, report_guide)
+            self.assertNotIn(forbidden_alias, report_svg)
+            self.assertIn("SVD 模態 1", report_svg)
+            self.assertIn("解釋變異量", report_svg)
+            self.assertNotIn("EV=", report_svg)
+            self.assertNotIn("focus anchor", report_svg.lower())
+            self.assertIn("#d9d6cf", report_svg.lower())
+            formatted_vector_reference = (
+                f"{mode_one_assets['vector_reference_mps_per_pc_standard_deviation_at_95th_percentile']:.2f}"
+            )
+            self.assertNotIn(formatted_vector_reference + " m/s", report_svg)
+            self.assertIn(formatted_vector_reference + " m/s", vector_scale_transparent_svg)
+            self.assertIn(formatted_vector_reference + " m/s", with_vector_scale_svg)
+            # 透明獨立版只允許純黑內容與透明畫布，不得殘留前一版白色底板或 halo。
+            # Matplotlib 透明 figure 的 patch 會以 `fill: none` 表示，實際 alpha 契約
+            # 另由下方 PNG 像素測試確認。
+            self.assertNotIn("#ffffff", vector_scale_transparent_svg.lower())
+            self.assertIn("#000000", vector_scale_transparent_svg.lower())
+
+            # 報告版 PNG 即使在深色圖片檢視器或簡報母片上也必須維持白底；若 PNG 含
+            # alpha，所有像素亦須完全不透明，避免再次出現「圖底色變黑」的合成問題。
+            import matplotlib.image as mpimg
+
+            report_image = mpimg.imread(result_dir / "figures" / "report" / "svd_mode_01_spatial_report.png")
+            if report_image.ndim == 3 and report_image.shape[2] == 4:
+                self.assertTrue(np.allclose(report_image[:, :, 3], 1.0))
+            vector_scale_transparent_image = mpimg.imread(
+                result_dir
+                / "figures"
+                / "report"
+                / "svd_mode_01_spatial_report_vector_scale_transparent.png"
+            )
+            self.assertEqual(vector_scale_transparent_image.ndim, 3)
+            self.assertEqual(vector_scale_transparent_image.shape[2], 4)
+            transparent_alpha = vector_scale_transparent_image[:, :, 3]
+            # 四角與大部分畫布應完全透明，而純黑箭頭／文字像素必須可見。限制不鎖死
+            # antialiasing 的精確 alpha，只驗證「無白底」與「內容存在」兩個語意。
+            self.assertTrue(np.allclose(transparent_alpha[[0, -1]][:, [0, -1]], 0.0))
+            self.assertGreater(float(np.max(transparent_alpha)), 0.99)
+            # 緊密裁切會刻意降低透明像素比例；仍要求過半畫布完全透明，以確認沒有
+            # 矩形底板，同時不把 85% 這類舊大畫布門檻誤當成品質目標。
+            self.assertGreater(float(np.mean(transparent_alpha == 0.0)), 0.60)
+            nonzero_rows, nonzero_columns = np.where(transparent_alpha > 0.0)
+            left_padding = int(nonzero_columns.min())
+            right_padding = int(transparent_alpha.shape[1] - 1 - nonzero_columns.max())
+            top_padding = int(nonzero_rows.min())
+            bottom_padding = int(transparent_alpha.shape[0] - 1 - nonzero_rows.max())
+            # artist bbox 四周使用同一個 inch padding；容許 2 px 是因 PNG antialiasing
+            # 與浮點 bbox 轉整數像素時可能各自向內／向外取整一個像素。
+            self.assertLessEqual(abs(left_padding - right_padding), 2)
+            self.assertLessEqual(abs(top_padding - bottom_padding), 2)
+            with_vector_scale_image = mpimg.imread(
+                result_dir
+                / "figures"
+                / "report"
+                / "svd_mode_01_spatial_report_with_vector_scale.png"
+            )
+            if with_vector_scale_image.ndim == 3 and with_vector_scale_image.shape[2] == 4:
+                self.assertTrue(np.allclose(with_vector_scale_image[:, :, 3], 1.0))
+            # 緊密裁切後的透明素材應落在主圖寬度 10–18%、高度不超過 4%；下限防止
+            # 文字被誤裁，上限防止回到 601×154 且左右大量留白的舊版素材。
+            self.assertGreaterEqual(
+                vector_scale_transparent_image.shape[1] / report_image.shape[1],
+                0.10,
+            )
+            self.assertLessEqual(
+                vector_scale_transparent_image.shape[1] / report_image.shape[1],
+                0.18,
+            )
+            self.assertLessEqual(
+                vector_scale_transparent_image.shape[0] / report_image.shape[0],
+                0.04,
+            )
+            # 內嵌備用圖必須和標準主圖維持相同像素尺寸，PowerPoint 替換時不應跳動。
+            self.assertEqual(with_vector_scale_image.shape, report_image.shape)
 
     def test_existing_run_is_never_silently_overwritten(self) -> None:
         """同一輸入與設定應得到同一 run ID，第二次執行必須拒絕覆寫既有科學成果。"""
@@ -291,12 +461,20 @@ class SurfaceMultivariateSvdTest(unittest.TestCase):
             )
             bundle_metadata = json.loads((bundle / "metadata.json").read_text(encoding="utf-8"))
             self.assertTrue(bundle.is_dir())
+            self.assertEqual(bundle.name, "academic_report_ready_v6")
+            self.assertEqual(bundle_metadata["bundle_id"], "academic_report_ready_v6")
+            self.assertEqual(bundle_metadata["schema_version"], "1.1.0")
+            bundle_provenance_sha256 = bundle_metadata["bundle_provenance_sha256"]
+            self.assertEqual(len(bundle_provenance_sha256), 64)
+            self.assertTrue(
+                all(character in "0123456789abcdef" for character in bundle_provenance_sha256)
+            )
             self.assertEqual(bundle_metadata["status"], "figures_ready")
             self.assertEqual(bundle_metadata["source_run"]["run_id"], source_run.name)
             self.assertEqual(bundle_metadata["source_run"]["metadata_sha256"], source_metadata_sha256)
             self.assertFalse(bundle_metadata["source_run"]["surface_cache_read"])
             self.assertFalse(bundle_metadata["source_run"]["svd_solver_called"])
-            self.assertEqual(len(bundle_metadata["figures"]), 13)
+            self.assertEqual(len(bundle_metadata["figures"]), 50)
             self.assertTrue(all((bundle / relative_path).is_file() for relative_path in bundle_metadata["figures"]))
             self.assertEqual(
                 set(bundle_metadata["performance"]["stages_seconds"]),
@@ -309,7 +487,9 @@ class SurfaceMultivariateSvdTest(unittest.TestCase):
             )
             self.assertEqual(hashlib.sha256(source_metadata_path.read_bytes()).hexdigest(), source_metadata_sha256)
             self.assertFalse((source_run / "figures").exists())
-            with self.assertRaises(FileExistsError):
+            # 對外目錄只保留 style 版本，同一 v6 不得靠另一個 hash 目錄並存；若繪圖
+            # 規格改變，錯誤訊息必須明確要求升版，避免六區成果樹再次累積難辨識版本。
+            with self.assertRaisesRegex(FileExistsError, "提升 figures.style"):
                 replot_surface_multivariate_svd(
                     run_dir=source_run,
                     output_root=root / "derived",
@@ -527,6 +707,9 @@ class SurfaceMultivariateSvdTest(unittest.TestCase):
             self.assertGreater(result.total_elapsed_seconds, 0.0)
             self.assertEqual([item.run_id for item in result.items], [run.name for run in source_runs])
             self.assertTrue(all(item.bundle_dir.is_dir() and item.elapsed_seconds > 0.0 for item in result.items))
+            self.assertTrue(
+                all(item.bundle_dir.name == "academic_report_ready_v6" for item in result.items)
+            )
             for run in source_runs:
                 self.assertFalse((run / "figures").exists())
                 self.assertEqual(

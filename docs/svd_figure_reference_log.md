@@ -1,13 +1,13 @@
 # SVD 結果圖表文獻追溯紀錄
 
-本文件記錄 `academic_clean_postproduction_v2` 圖表設計實際查閱的學術來源，供成果報告、
+本文件記錄 `academic_report_ready_v6` 圖表設計實際查閱的學術來源，供成果報告、
 論文撰寫、圖說製作與日後修改程式時逐項核對。這裡只把來源中可直接支持的畫法列為
-「文獻慣例」；透明背景、移除圖中文字、資料缺口斷線等本專案需求則另外標示，避免把工程
-決策錯誤歸因於原始論文。
+「文獻慣例」；白底完整標示、資料缺口斷線等本專案需求則另外標示，避免把工程決策
+錯誤歸因於原始論文。
 
 - 查閱日期：2026-07-30
 - 查閱範圍：期刊官方全文頁面、方法段落、圖說與官方 PDF
-- 對應程式版本：`academic_clean_postproduction_v2`
+- 對應程式版本：`academic_report_ready_v6`
 - BibTeX：[`svd_figure_references.bib`](svd_figure_references.bib)
 
 ## 來源一：海表流 SVD 的空間向量與時間模態
@@ -120,8 +120,13 @@ https://doi.org/10.5194/os-18-1741-2022
 | 原始時間變化另疊加慢變化線 | de Oliveira Júnior et al. (2022), Fig. 7 | 借用視覺結構；時間尺度不同 |
 | 逐時灰線加逐日平均黑線 | 無直接照搬來源 | 本專案全年可讀性決策 |
 | 缺測時段斷線 | 無直接照搬來源 | 本專案資料完整性決策 |
-| 圖內完全不含文字、色條或圖例 | 使用者指定 | 後製需求 |
-| 透明 PNG、SVG、外部 `plot_metadata.json` | 無直接照搬來源 | 本專案後製與 provenance 決策 |
+| 白底完整標題、單位、色條與圖例 | 無直接照搬來源 | 本專案可解讀性與報告交付決策 |
+| 標題寫完整「解釋變異量」而不只用 EV 縮寫 | 無直接照搬來源 | 本專案非專業讀者可讀性決策 |
+| 經緯度軸與色條把實際上下限列為首尾刻度 | 無直接照搬來源 | 本專案數值邊界稽核決策 |
+| 標準主圖不預先疊入向量參考尺；另存同 stem `_vector_scale_transparent` 全透明緊密裁切素材及 `_with_vector_scale` 備用完整圖 | 文獻中的向量比例概念；右下角 axes-fraction quiverkey 版面參考相鄰 `OCM-NetCDF-Visualizer`、`OCM-Data-Preprocessing` | 本專案後製交付決策；兩版直接沿用主圖 quiver scale，不編碼額外資料 |
+| 暖灰向量陸地與深灰高解析海岸線疊於海洋資料場上方 | 海洋空間圖共通地理參照方式；岸線來源另依本專案圖資紀錄 | 本專案學術地圖決策 |
+| 不在正式圖顯示 SVD 正負號 anchor | 無直接照搬來源 | 避免被誤認為測站的報告決策 |
+| PNG、SVG 與外部 `plot_metadata.json` | 無直接照搬來源 | 本專案報告與 provenance 決策 |
 | 裁到有效 cell edge、排除邊界裁切箭頭 | 無直接照搬來源 | 本專案繪圖品質決策 |
 
 ## 後續引用建議
@@ -131,5 +136,14 @@ https://doi.org/10.5194/os-18-1741-2022
 1. 描述 SVD 空間場與 PC 配對時，引用 Song et al. (2025)。
 2. 描述流速 SVD 空間箭頭抽稀與時間模態分開呈現時，引用 de Oliveira Júnior et al. (2022)。
 3. 描述標準化 PC、回歸幅度及「每一個 PC 標準差」的物理單位時，引用 Volkov et al. (2022)。
-4. 「無文字透明圖層、逐日黑線、缺口斷線」應寫成本研究的製圖與品質控制設定，不應標為
+4. 「白底完整標示、逐日黑線、缺口斷線」應寫成本研究的製圖與品質控制設定，不應標為
    上述論文提出的方法。
+
+## 岸線圖資來源
+
+空間圖使用
+`OCM-Data-Preprocessing/data/coastline/osm_land_polygons_taiwan_v1.geojson`。該檔為
+OSMData land-polygons，由 OpenStreetMap `natural=coastline` 衍生，座標為 WGS84，
+SHA-256 是 `9e2e0ac9bc527aca87d89332cd428fdcb776eefbf94a85dd70f887f729b95fdd`。
+正式報告與再散布須保留 OpenStreetMap／ODbL attribution。此圖資只用於高解析陸地
+填色與海岸線，不提升 OCM 流場解析度，也不改變 SVD 遮罩或計算。

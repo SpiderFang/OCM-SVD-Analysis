@@ -59,11 +59,12 @@
     "policy": "貢寮單區先以 4 個 I/O worker 平行讀取不同月份的 focus bbox 小窗；I/O 完成後以 4 個受控 BLAS 執行緒計算。來源時間軸保留缺日斷點，不跨缺日插補。"
   },
   "figures": {
-    "style": "academic_clean_postproduction_v2",
+    "style": "academic_report_ready_v6",
     "mode_count": 5,
     "max_quiver_arrows_per_axis": 16,
     "output_formats": ["png", "svg"],
     "raster_dpi": 300,
-    "transparent_background": true
+    "coastline_geojson": "OCM-Data-Preprocessing/data/coastline/osm_land_polygons_taiwan_v1.geojson",
+    "coastline_geojson_sha256": "9e2e0ac9bc527aca87d89332cd428fdcb776eefbf94a85dd70f887f729b95fdd"
   }
 }

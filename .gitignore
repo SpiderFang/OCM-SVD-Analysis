@@ -6,7 +6,7 @@ __pycache__/
 .pytest_cache/
 .coverage
 
-# SERVER 或本機的大型快取與 SVD/EOF 衍生陣列都由流程重建，不應納入版本控制。
+# SERVER 或本機的大型快取與 SVD 衍生陣列都由流程重建，不應納入版本控制。
 outputs/
 derived/
 data/
@@ -15,3 +15,4 @@ data/
 .DS_Store
 # temp。
 tmp/
+work/

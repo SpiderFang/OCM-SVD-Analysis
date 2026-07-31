@@ -1,8 +1,10 @@
-"""從不可覆寫的既有 SVD run 建立獨立、可追溯的 figure bundle。
+"""從不可覆寫的既有 SVD run 建立版本化、可追溯的 figure bundle。
 
 重繪流程只讀既有 run 內的平均場、回歸空間模態、標準化 PC、時間軸與 explained
 variance，不讀上游 surface cache，也不呼叫 SVD 求解器。圖檔發布到獨立的
-`svd_figure_bundles/` 樹，避免為了改 DPI、格式或繪圖程式而覆寫原科學成果。
+`svd_figure_bundles/` 樹；對外目錄只使用 figure style 版本號，例如
+`academic_report_ready_v6`。完整來源、設定、renderer 與環境雜湊保留在 metadata，
+不附加到目錄名稱，讓簡報選圖路徑保持簡潔且不會出現多個難以辨認的 hash 版本。
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import os
+import platform
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -27,13 +30,14 @@ from .surface_multivariate_svd import (
     _make_figures,
     _read_json_object,
     _require,
+    _resolve_report_font,
     _write_json,
     load_analysis_config,
 )
 
 
-FIGURE_BUNDLE_SCHEMA_VERSION = "1.0.0"
-"""獨立 figure bundle metadata 的版本；與科學 run schema 分開演進。"""
+FIGURE_BUNDLE_SCHEMA_VERSION = "1.1.0"
+"""figure bundle metadata 版本；1.1 起以 style 作目錄名、雜湊只存 metadata。"""
 
 
 @dataclass(frozen=True)
@@ -151,9 +155,38 @@ def _load_existing_run_figure_inputs(run_dir: Path, metadata: dict[str, Any]) ->
 
 
 def _renderer_code_sha256() -> str:
-    """雜湊實際繪圖函式原始碼，使程式改圖後自動產生新的 immutable bundle ID。"""
+    """雜湊繪圖函式所在完整模組，納入 bundle provenance。
 
-    return hashlib.sha256(inspect.getsource(_make_figures).encode("utf-8")).hexdigest()
+    岸線解析、polygon 裁切與字型選擇已拆成可測試 helper；若只雜湊 `_make_figures`
+    本體，修改 helper 後可能未反映在成果身分。保守雜湊完整模組雖會讓不影響圖面的
+    同檔修改也改變 provenance SHA-256，但不會把不同 renderer 誤認為相同成果。
+    """
+
+    source_path_raw = inspect.getsourcefile(_make_figures)
+    _require(isinstance(source_path_raw, str), "無法定位 SVD renderer 原始碼")
+    return _sha256_file(Path(source_path_raw))
+
+
+def _renderer_environment_signature() -> dict[str, str]:
+    """建立會影響 PNG/SVG 位元內容的最小繪圖環境簽章。
+
+    Matplotlib、FreeType 與實際中文字型不同時，即使資料與程式相同，文字寬度和像素仍
+    可能不同。把版本與字型檔 SHA-256 納入 bundle provenance，可避免本機 Heiti 與
+    SERVER Noto 產生不同檔案卻被誤認為相同成果；絕對字型路徑不會寫入成果。
+    """
+
+    import matplotlib
+    import matplotlib.ft2font
+
+    font_name, font_sha256 = _resolve_report_font()
+    return {
+        "python_version": platform.python_version(),
+        "numpy_version": np.__version__,
+        "matplotlib_version": matplotlib.__version__,
+        "freetype_version": matplotlib.ft2font.__freetype_version__,
+        "report_font_name": font_name,
+        "report_font_file_sha256": font_sha256,
+    }
 
 
 def replot_surface_multivariate_svd(
@@ -190,20 +223,29 @@ def replot_surface_multivariate_svd(
         )
         source_metadata_sha256 = _sha256_file(source_metadata_path)
         renderer_code_sha256 = _renderer_code_sha256()
-        bundle_digest = _canonical_json_hash(
+        renderer_environment = _renderer_environment_signature()
+        # 對外 bundle ID 只保留明確 figure style 版本，例如
+        # `academic_report_ready_v6`。完整 64 字元 provenance SHA-256 仍涵蓋來源
+        # metadata、科學設定、圖面設定、renderer 與環境；它只寫入 metadata，不再放進
+        # 目錄名。如此可避免使用者面對多個 v6_<hash> 而無法判斷正式版本。
+        bundle_provenance_sha256 = _canonical_json_hash(
             {
                 "source_run_id": source_run_id,
                 "source_metadata_sha256": source_metadata_sha256,
                 "source_science_config_sha256": source_science_hash,
                 "figure_config": render_config.raw["figures"],
                 "renderer_code_sha256": renderer_code_sha256,
+                "renderer_environment": renderer_environment,
             }
-        )[:12]
+        )
         safe_style = "".join(character if character.isalnum() or character in "-_" else "_" for character in render_config.figure_style)
-        bundle_id = f"{safe_style}_{bundle_digest}"
+        bundle_id = safe_style
         final_dir = resolved_output_root / "svd_figure_bundles" / source_run_id / bundle_id
         if final_dir.exists():
-            raise FileExistsError(f"相同來源、圖面設定與 renderer 的 figure bundle 已存在，拒絕覆寫: {final_dir}")
+            raise FileExistsError(
+                "figure style 版本已發布，拒絕覆寫；若圖面規格確實改變，請先提升 "
+                f"figures.style 版本號再重繪: {final_dir}"
+            )
         final_dir.parent.mkdir(parents=True, exist_ok=True)
         partial_dir = final_dir.parent / f".{bundle_id}.partial-{uuid.uuid4().hex}"
         partial_dir.mkdir(parents=False)
@@ -234,6 +276,7 @@ def replot_surface_multivariate_svd(
                 "schema_version": FIGURE_BUNDLE_SCHEMA_VERSION,
                 "status": "figures_ready",
                 "bundle_id": bundle_id,
+                "bundle_provenance_sha256": bundle_provenance_sha256,
                 "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "source_run": {
                     "run_id": source_run_id,
@@ -248,12 +291,14 @@ def replot_surface_multivariate_svd(
                     "style": render_config.figure_style,
                     "renderer_function": "ocm_svd_analysis.surface_multivariate_svd._make_figures",
                     "renderer_code_sha256": renderer_code_sha256,
+                    "environment": renderer_environment,
                 },
                 "figure_config": render_config.raw["figures"],
                 "figures": figure_files,
                 "limitations": [
                     "本 bundle 只重繪既有科學陣列，沒有重新讀取 surface cache、重新插補或重新求解 SVD。",
                     "圖面科學意義與限制沿用 source_run metadata；bundle 不取代來源 run。",
+                    "目錄名只保存 figure style 版本；完整內容身分由 bundle_provenance_sha256 與 renderer/source 欄位追溯。",
                 ],
             }
         bundle_metadata["performance"] = performance.to_metadata(

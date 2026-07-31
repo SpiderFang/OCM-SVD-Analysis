@@ -252,16 +252,19 @@ uv run ocm-svd-replot \
 $SVD_OUTPUT_ROOT/
 └── svd_figure_bundles/
     └── <來源-run-id>/
-        └── <figure-style>_<hash>/
+        └── <figure-style-version>/
             ├── figure_config.json
             ├── metadata.json
             └── figures/
 ```
 
-bundle ID 同時包含來源 metadata SHA-256、`figures` 設定及 renderer 原始碼 SHA-256。
-相同來源、設定與程式拒絕覆寫；繪圖程式或視覺設定改變時會建立新 bundle。來源科學 run
-不新增 `figures/`、不改 metadata，也不複製科學陣列。若要改 DPI、輸出格式或 mode count，
-可另外提供一份完整設定：
+對外目錄與 `bundle_id` 只保留可讀的 figure style 版本，例如
+`academic_report_ready_v6`，不再附加 hash。來源 metadata、`figures` 設定、renderer
+原始碼、繪圖環境與字型仍共同形成完整 `bundle_provenance_sha256`，保存在 bundle
+`metadata.json`。同一版本一旦發布便拒絕覆寫；繪圖程式或視覺規格若要改變，必須先把
+`figures.style` 升版，例如由 v6 升為 v7，不能在同一版本下並存多個 hash 目錄。
+來源科學 run 不新增 `figures/`、不改 metadata，也不複製科學陣列。若要改 DPI、輸出
+格式或 mode count，可另外提供一份已升版的完整設定：
 
 ```bash
 uv run ocm-svd-replot \
@@ -438,26 +441,70 @@ PC 與解釋變異與薄型 SVD 完全等價。」
 | `cell_triplet_valid_fraction.npy` | `(lat, lon)` | u/v/eta 聯合有效率，供檢查排除原因。 |
 | `imputed_mask.npy` | `(time, component, lat, lon)` | 短缺值插補位置；component 順序是 u、v、eta。 |
 | `metadata.json` | JSON | 設定、月份 metadata hash、遮罩、權重、RMS、正負號、數值檢查、逐階段效能與限制。 |
-| `figures/` | PNG、SVG、JSON | 無文字透明背景的平均流、前五模態空間圖與各自 PC、explained-variance 圖；單位與尺度位於 `plot_metadata.json`。 |
+| `figures/` | PNG、SVG、JSON、Markdown | `report/*_report` 白底完整標示圖、圖面 sidecar 與 bundle 內報告指南。 |
 
 圖中的模態箭頭是 SVD loading，不是特定時刻的實際流速；需與同一模態 PC 相乘後才是
 對距平流場的重建。每次 run 都以設定與上游月份 metadata hash 形成 ID，既有成果拒絕覆寫。
 
-### 學術圖表與後製圖層
+### 學術圖表：正式成果只交付可自我解釋的報告版
 
-`academic_clean_postproduction_v2` 依海洋流場 SVD 論文的共同表達方式輸出：
+正式設定採 `academic_report_ready_v6`，依海洋流場 SVD 論文的共同表達方式，只交付
+能在脫離程式碼與 sidecar 後仍可讀懂的完整報告圖：
 
-- 空間模態以 `regression_eta.npy` 作紅藍對稱底色，疊加 `regression_u.npy` 與
-  `regression_v.npy` 流速箭頭；數值代表 PC 改變 1 個標準差時的物理量變化。
+- `figures/report/*_report.{png,svg}` 是不透明白底的正式報告版，內含區域與模態標題、
+  完整中文解釋變異量、經緯度與單位、η 色條、高解析海岸線、PC 圖例與月份刻度。
+  經緯度軸與色條都強制顯示實際上下限；SVD 正負號 anchor 不畫在圖上，避免被誤認
+  為測站。
+- 每張平均場／模態空間圖另有同 stem 的
+  `*_vector_scale_transparent.{png,svg}`，只顯示該圖實際 q95 向量與單位。其背景
+  alpha 完全透明，內容是純黑箭頭與數值，不含白色底板、半透明框或 halo；PowerPoint
+  後製建議使用 SVG。素材已依箭頭與文字的實際外框對稱裁切，參考箭頭也依主圖 q95
+  箭頭的顯示長度產生；主圖與 SVG 以原始尺寸匯入後應先群組再一起縮放，放在右下角
+  並內縮約 2.5%，不要再單獨放大參考尺。
+- 每張空間圖另產出 `*_with_vector_scale.{png,svg}` 備用完整圖，已用主圖相同 quiver
+  scale 把參考箭頭畫在座標框內右下角。版面沿用 `OCM-NetCDF-Visualizer` 與
+  `OCM-Data-Preprocessing` 的 axes-fraction quiverkey、東側標籤及半透明矩形結構，
+  但縮成 26.0%×6.0% 的緊湊框。這個版本適合不想手動疊圖時直接使用；標準
+  `*_report` 主圖仍不含參考尺，兩者不能同時疊用。
+- `figures/REPORT_GUIDE.md` 會隨每個 immutable figure bundle 產生，記錄該次實際樣本
+  覆蓋、斷點、前五模態單一／累積解釋變異量、色階與箭頭 q95 尺度，以及空間圖、
+  配對比例尺與 PC 的解讀規則；圖檔搬離專案後仍保有最小必要說明。
+
+兩套圖共同遵守下列科學語意：
+
+- 空間模態以 `regression_eta.npy` 作零中心紅藍對稱底色，疊加 `regression_u.npy` 與
+  `regression_v.npy` 流速箭頭；數值代表對應 PC 改變 1 個標準差時的物理量變化。若整張
+  η 圖只有藍色，表示採目前正負號慣例時該模態 η 回歸值全為負，不是繪圖錯誤。
 - 每一個空間模態各有一張獨立的標準化 PC 時序；淡灰細線保留逐時值，黑線是只供全年
   視覺閱讀的日平均。兩層在缺日時段都會斷線，不以直線跨越缺測。
-- explained variance 另以 individual bars 與 cumulative line 輸出。
-- 圖內不烙入標題、軸標籤、刻度文字、圖例、色條、anchor、panel letter 或 EV 註記；
-  透明背景 PNG 供快速排版，SVG 保留箭頭與線條供向量後製。
-- `figures/plot_metadata.json` 保存 bbox、單位、每張圖的色階、箭頭尺度、EV、缺口數與文獻
-  依據，因此移除圖中文字不會失去科學 provenance。
+- 解釋變異量另以單一模態長條與累積折線輸出。
+- `figures/plot_metadata.json` 保存 bbox、單位、report-only 交付政策、每張圖的色階、
+  箭頭尺度、解釋變異量、明確邊界刻度、缺口數、實際 CJK 字型與文獻依據。
 - 空間圖裁到 analysis bbox 與最外側有效 cell edge 的交集，不把無資料的 bbox 尾端畫成
   白帶；距邊界過近而可能被裁切的箭頭不畫，但完整底色與數值陣列不受影響。
+- 空間圖以 `OCM-Data-Preprocessing/data/coastline/osm_land_polygons_taiwan_v1.geojson`
+  疊加 OSMData／OpenStreetMap 高解析向量陸地；暖灰陸地與深灰海岸線只作地理參照，
+  不改變 1 km OCM 流場、分析遮罩、SVD 權重或統計。來源 SHA-256 與 ODbL attribution
+  會寫入每個 figure bundle。
+- 產圖設定只接受 `academic_report_ready_v6`；程式不保留無文字主圖或透明主圖相容
+  分支，避免六區批次重新產出「拿到檔案仍不知道代表什麼」的交付物。唯一透明資產是
+  檔名明示 `_vector_scale_transparent` 的後製參考尺，內容仍保留數值與單位。
+
+### 報告時如何解讀空間圖與 PC
+
+每個模態必須把 `svd_mode_XX_spatial_report`、同 stem 的
+`svd_mode_XX_spatial_report_vector_scale_transparent` 與
+`svd_mode_XX_pc_report` 成對呈現；若不手動後製，使用
+`svd_mode_XX_spatial_report_with_vector_scale` 取代前兩者。
+空間圖不是某個日期的實際流況，而是「標準化 PC 增加 1σ 時」的共同距平形態：
+
+1. PC 為正時，η 與 u/v 依空間圖的色號及箭頭方向解讀。
+2. PC 為負時，η 正負與全部箭頭方向反轉。
+3. 單一模態在某時刻的距平貢獻等於空間回歸圖樣乘上該時刻標準化 PC。
+4. SVD 的整組空間模態與 PC 同時乘以 -1 仍是同一解，因此不可脫離 PC 單獨把
+   「藍色」命名為下降事件。
+5. 解釋變異量是該模態對 u/v/η 經分量 RMS 正規化及面積加權後「總變異」的解釋比例，
+   不是海面高度或流速本身的百分比。
 
 採用的主要圖表慣例來自：
 
@@ -476,6 +523,10 @@ PC 與解釋變異與薄型 SVD 完全等價。」
 引用管理軟體可直接匯入
 [`docs/svd_figure_references.bib`](docs/svd_figure_references.bib)。未來新增或更換
 圖表慣例時，應同步更新這兩份檔案與 `figures/plot_metadata.json` 的來源紀錄。
+
+2025 貢寮實際數值、各模態的安全解讀、可直接使用的簡報順序與講稿，以及「透明 PNG
+為何在深色檢視器看成黑底」的說明，另見
+[`docs/gongliao_2025_svd_report_interpretation.md`](docs/gongliao_2025_svd_report_interpretation.md)。
 
 ## 本機驗證
 
