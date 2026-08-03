@@ -65,6 +65,23 @@ class TimeAxisRepair:
 
 
 @dataclass(frozen=True)
+class TimeAxisCanonicalization:
+    """跨月份來源 UTC 軸的可追溯排序與去重摘要。
+
+    全部可得資料的原始檔案若在跨日／跨夜邊界出現倒序或重複 UTC，`sort_and_deduplicate_prefer_last`
+    會先按 UTC 穩定排序，再只保留同一 UTC 在原始月份序列中最後出現的完整樣本索引。這不能
+    還原未知的真實觀測時刻，而是建立供統計 SVD 使用、每個 UTC 至多一筆的決定性時間座標；
+    被重排與捨棄的數量必須寫入 metadata，防止分析結果被誤稱為未經時間整理的原始序列。
+    """
+
+    policy: str
+    input_time_count: int
+    output_time_count: int
+    reordered_time_step_count: int
+    dropped_duplicate_time_step_count: int
+
+
+@dataclass(frozen=True)
 class AnalysisConfig:
     """經驗證的單一表層 SVD run 設定。
 
@@ -92,6 +109,7 @@ class AnalysisConfig:
     expected_timestep_hours: float
     maximum_source_gap_hours: float | None
     known_time_axis_repairs: tuple[TimeAxisRepair, ...]
+    time_axis_canonicalization_policy: str
     minimum_static_ocean_cells: int
     minimum_cell_valid_fraction: float
     max_interpolation_steps: int
@@ -165,6 +183,7 @@ class LoadedSurfaceData:
     lon_slice: slice
     source_months: tuple[SourceMonth, ...]
     repaired_time_step_count: int
+    time_axis_canonicalization: TimeAxisCanonicalization
 
 
 @dataclass(frozen=True)
@@ -537,6 +556,14 @@ def load_analysis_config(
         maximum_source_gap_hours = _as_float(maximum_source_gap_raw, "input.maximum_source_gap_hours")
         _require(maximum_source_gap_hours > 0.0, "input.maximum_source_gap_hours 若非 null 必須為正數")
     known_time_axis_repairs = _load_known_time_axis_repairs(input_config, years, months, expected_timestep_hours)
+    # 預設 reject 保護既有嚴格完整月成果；只有無法重建原始時序且已採「全部可得樣本」
+    # 科學契約時，才允許明確選擇 canonicalization。policy 不依賴檔名或 cache_kind 推測，
+    # 避免上游將 partial month 改回 ready 後，時間處理規則在沒有版本紀錄的情況下改變。
+    time_axis_canonicalization_policy = input_config.get("time_axis_canonicalization_policy", "reject")
+    _require(
+        time_axis_canonicalization_policy in {"reject", "sort_and_deduplicate_prefer_last"},
+        "input.time_axis_canonicalization_policy 必須是 reject 或 sort_and_deduplicate_prefer_last",
+    )
 
     mask_config = raw.get("mask_and_missing_data")
     if not isinstance(mask_config, dict):
@@ -611,6 +638,7 @@ def load_analysis_config(
         expected_timestep_hours=expected_timestep_hours,
         maximum_source_gap_hours=maximum_source_gap_hours,
         known_time_axis_repairs=known_time_axis_repairs,
+        time_axis_canonicalization_policy=time_axis_canonicalization_policy,
         minimum_static_ocean_cells=_as_positive_int(mask_config.get("minimum_static_ocean_cells"), "mask_and_missing_data.minimum_static_ocean_cells"),
         minimum_cell_valid_fraction=_as_closed_fraction(mask_config.get("minimum_cell_triplet_valid_fraction"), "mask_and_missing_data.minimum_cell_triplet_valid_fraction"),
         max_interpolation_steps=_as_positive_int(mask_config.get("max_consecutive_missing_timesteps_to_interpolate"), "mask_and_missing_data.max_consecutive_missing_timesteps_to_interpolate", allow_zero=True),
@@ -858,8 +886,13 @@ def load_surface_focus_data(
 
     fields_all = np.concatenate([chunk.fields for chunk in chunks], axis=0)
     valid_all = np.concatenate([chunk.valid_surface for chunk in chunks], axis=0)
-    time_all = np.concatenate([chunk.time_utc_ns for chunk in chunks], axis=0)
-    _require(np.all(np.diff(time_all) > 0), "跨月份串接後 time_utc_ns 必須嚴格遞增；不可有重複邊界時次")
+    source_time_all = np.concatenate([chunk.time_utc_ns for chunk in chunks], axis=0)
+    # 時間 canonicalization 只在設定明確授權時才執行，且以回傳的同一組索引同步重排
+    # u/v/eta 與 valid mask，避免只改 time 軸而讓流場樣本錯配。嚴格設定會在此保留原有的
+    # 「任何跨月倒序或重複即拒絕」行為；全部可得設定則以可追溯的決定性規則產生唯一 UTC 軸。
+    time_all, retained_time_indices, time_axis_canonicalization = _canonicalize_source_time_axis(source_time_all, config)
+    fields_all = fields_all[retained_time_indices]
+    valid_all = valid_all[retained_time_indices]
     return LoadedSurfaceData(
         lon,
         lat,
@@ -873,6 +906,66 @@ def load_surface_focus_data(
         lon_slice,
         tuple(chunk.source for chunk in chunks),
         sum(chunk.repaired_time_step_count for chunk in chunks),
+        time_axis_canonicalization,
+    )
+
+
+def _canonicalize_source_time_axis(
+    time_utc_ns: np.ndarray,
+    config: AnalysisConfig,
+) -> tuple[np.ndarray, np.ndarray, TimeAxisCanonicalization]:
+    """依設定建立嚴格遞增、每個 UTC 唯一的分析時間軸與同步資料索引。
+
+    `reject` 供完整月份與其他嚴格科學 run 使用，要求上游串接後本身已嚴格遞增。若原始
+    資料在跨日／跨夜邊界有不可考的重複或倒序，`sort_and_deduplicate_prefer_last` 則以
+    stable sort 保留同 UTC 最後出現的樣本：輸入順序固定為 config 的年份、月份與月內索引，
+    故選擇規則不受 I/O worker 完成順序影響。它不創造、內插或修改流速資料，只捨棄 UTC
+    重複觀測中的較早一筆並重排保留樣本；所有影響由回傳摘要保存至成果 metadata。
+    """
+    """
+    處理順序為：
+    1. 讀取每個月的 time.npy。
+    2. 先在 `_apply_known_time_axis_repairs` 套用「已知」修正；呼叫點在第 820 行。
+    3. 合併 2024–2025 全部月份後，呼叫 `_canonicalize_source_time_axis`。
+    4. 以 UTC 穩定排序、每個重複 UTC 僅保留來源順序中最後一筆，並同步重排 u/v/eta 等資料；排序與去重的實作在第 946-950 行。
+    """
+
+    source_time = np.asarray(time_utc_ns, dtype=np.int64)
+    _require(source_time.ndim == 1 and source_time.size >= 2, "跨月份 time_utc_ns 必須是一維且至少兩筆")
+    original_indices = np.arange(source_time.size, dtype=np.int64)
+    if config.time_axis_canonicalization_policy == "reject":
+        _require(np.all(np.diff(source_time) > 0), "跨月份 UTC 時軸有倒序或重複時次")
+        return (
+            source_time,
+            original_indices,
+            TimeAxisCanonicalization(
+                policy="reject",
+                input_time_count=int(source_time.size),
+                output_time_count=int(source_time.size),
+                reordered_time_step_count=0,
+                dropped_duplicate_time_step_count=0,
+            ),
+        )
+
+    # mergesort 保證相同 UTC 保持輸入月份／月內樣本順序；每段相同 UTC 的最後一筆因而
+    # 等價於「後出現樣本優先」。這是原始時刻不可考時唯一不依賴數值內容、可跨區重做的
+    # 決定性選擇規則，避免依不同 AOI 的缺值比例挑到不同時間樣本。
+    chronological_order = np.argsort(source_time, kind="stable")
+    sorted_time = source_time[chronological_order]
+    group_ends = np.flatnonzero(np.r_[np.diff(sorted_time) != 0, True])
+    retained_indices = chronological_order[group_ends]
+    canonical_time = sorted_time[group_ends]
+    _require(np.all(np.diff(canonical_time) > 0), "時間 canonicalization 後 UTC 軸仍非嚴格遞增")
+    return (
+        canonical_time,
+        retained_indices,
+        TimeAxisCanonicalization(
+            policy="sort_and_deduplicate_prefer_last",
+            input_time_count=int(source_time.size),
+            output_time_count=int(canonical_time.size),
+            reordered_time_step_count=int(np.count_nonzero(chronological_order != original_indices)),
+            dropped_duplicate_time_step_count=int(source_time.size - canonical_time.size),
+        ),
     )
 
 
@@ -2474,6 +2567,14 @@ def run_surface_multivariate_svd(
                 ],
                 "known_time_axis_repairs": config.raw["input"].get("known_time_axis_repairs", []),
                 "repaired_time_step_count": loaded.repaired_time_step_count,
+                "time_axis_canonicalization": {
+                    "policy": loaded.time_axis_canonicalization.policy,
+                    "input_time_count": loaded.time_axis_canonicalization.input_time_count,
+                    "output_time_count": loaded.time_axis_canonicalization.output_time_count,
+                    "reordered_time_step_count": loaded.time_axis_canonicalization.reordered_time_step_count,
+                    "dropped_duplicate_time_step_count": loaded.time_axis_canonicalization.dropped_duplicate_time_step_count,
+                    "semantics": "sort_and_deduplicate_prefer_last 先以 UTC 穩定排序，再保留每個重複 UTC 在設定年份、月份與月內索引序列中最後出現的樣本；它不補值、不改 u/v/eta 數值，且只在設定明確授權時使用。",
+                },
                 "source_time_axis": {
                     "expected_timestep_hours": config.expected_timestep_hours,
                     "median_timestep_hours": prepared.source_median_timestep_hours,

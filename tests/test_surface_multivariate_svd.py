@@ -43,6 +43,7 @@ def make_config(
     years: tuple[int, ...] | None = None,
     known_time_axis_repairs: list[dict[str, object]] | None = None,
     maximum_source_gap_hours: float | None = 2.0,
+    time_axis_canonicalization_policy: str = "reject",
 ) -> None:
     """建立最小但完整的三變數 SVD 設定，驗證 3×3 AOI 與五個輸出模態。
 
@@ -52,6 +53,8 @@ def make_config(
     陸地 polygon，確認正式圖會加入海岸線，但不會把圖面陸地寫回科學遮罩。
     `maximum_source_gap_hours=None` 用於驗證已核定的全部可得樣本可解除長缺口拒絕，
     但實際斷點仍必須寫入 metadata 供研究報告揭露。
+    `time_axis_canonicalization_policy` 則使合成快取可驗證嚴格設定拒絕重複 UTC，而全部
+    可得設定會以固定的後出現樣本優先規則產生唯一時間軸。
     """
 
     coastline_path = path.parent / "synthetic_land.geojson"
@@ -107,6 +110,7 @@ def make_config(
                 "required_cache_kinds": ["standard_month"],
                 "expected_timestep_hours": 1.0,
                 "maximum_source_gap_hours": maximum_source_gap_hours,
+                "time_axis_canonicalization_policy": time_axis_canonicalization_policy,
                 **({"known_time_axis_repairs": known_time_axis_repairs} if known_time_axis_repairs is not None else {}),
             },
             "mask_and_missing_data": {
@@ -560,6 +564,40 @@ class SurfaceMultivariateSvdTest(unittest.TestCase):
             self.assertEqual(source_axis["maximum_gap_policy"], "unbounded_but_reported")
             self.assertEqual(source_axis["maximum_gap_hours"], 25.0)
             self.assertEqual(source_axis["gap_break_count"], 1)
+
+    def test_available_samples_canonicalize_cross_month_duplicate_utc_with_last_sample_precedence(self) -> None:
+        """全部可得設定必須可決定性處理不可考的跨月份重複 UTC。
+
+        合成第二月完整往前錯標 24 小時，故兩個月各有相同的 24 個 UTC。嚴格政策應保持
+        拒絕；本測試只驗證已明確選擇 canonicalization 的 available 設定：stable sort 後
+        每個 UTC 只留原始序列最後出現的第二月樣本，並將輸入／輸出筆數、重排筆數與丟棄
+        的重複筆數保存到 metadata。這避免把未知時刻的重複樣本無聲加權兩次。
+        """
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config_path = root / "canonicalized_available_config.json"
+            make_config(
+                config_path,
+                analysis_label="synthetic_canonicalized_available_samples",
+                maximum_source_gap_hours=None,
+                time_axis_canonicalization_policy="sort_and_deduplicate_prefer_last",
+            )
+            result_dir = run_surface_multivariate_svd(
+                config_path=config_path,
+                surface_root=make_surface_cache(root, second_month_time_shift_hours=-24),
+                output_root=root / "derived",
+                make_figures=False,
+            )
+            metadata = json.loads((result_dir / "metadata.json").read_text(encoding="utf-8"))
+            canonicalization = metadata["input_surface"]["time_axis_canonicalization"]
+            output_time = np.load(result_dir / "time_utc_ns.npy", allow_pickle=False)
+            self.assertEqual(canonicalization["policy"], "sort_and_deduplicate_prefer_last")
+            self.assertEqual(canonicalization["input_time_count"], 48)
+            self.assertEqual(canonicalization["output_time_count"], 24)
+            self.assertEqual(canonicalization["dropped_duplicate_time_step_count"], 24)
+            self.assertGreater(canonicalization["reordered_time_step_count"], 0)
+            self.assertTrue(np.all(np.diff(output_time) == 3_600_000_000_000))
 
     def test_known_time_axis_repair_requires_expected_original_bounds_and_preserves_samples(self) -> None:
         """已知月界錯標只能在原始 UTC 完全吻合時平移，且不得刪除或複製流場樣本。

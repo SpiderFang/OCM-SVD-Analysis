@@ -483,12 +483,17 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
 
 這組設定保留上游 `ready` 月份中的 `standard_month` 與經 CLI 明確授權的
 `standard_partial_month`，不跨來源斷點插補，並以 `maximum_source_gap_hours: null` 明確解除
-來源缺口長度上限。這不是忽略時間品質：程式仍拒絕 UTC 倒序、重複時次或中位採樣步長不符，
-且會把每區實際最大缺口、斷點數與時間覆蓋率寫入 `metadata.json > input_surface.source_time_axis`。
+來源缺口長度上限。對原始時序已不可考的跨日／跨夜 UTC 倒序或重複，這組設定明確採
+`time_axis_canonicalization_policy: sort_and_deduplicate_prefer_last`：先以 UTC 穩定排序，再
+對每個相同 UTC 保留設定年份、月份與月內索引序列中最後出現的一筆樣本。它不補值、不修改
+u/v/eta 數值；重排與去重筆數、實際最大缺口、斷點數及覆蓋率皆寫入
+`metadata.json > input_surface.time_axis_canonicalization` 與 `source_time_axis`。canonicalization
+後仍要求唯一 UTC 軸的中位採樣步長符合 1 小時；若不符，必須以 metadata 與研究限制另行說明。
 龜山島與貢寮的共用東北臺灣 cache 另明載 `202507` 前 24 筆 UTC 時間座標的已知修正規則。
 
 正式 SVD 前應先執行唯讀預檢器；它只讀 24 個月的 `metadata.json` 與
-`time_utc_ns.npy`，逐區列出 partial 月份、最大來源缺口與斷點數，不建立 output 目錄：
+`time_utc_ns.npy`，逐區列出 partial 月份、最大來源缺口、斷點數及 canonicalization 的重排／
+去重筆數，不建立 output 目錄：
 
 ```bash
 ./scripts/preflight_surface_svd_time_axis.sh
@@ -507,7 +512,8 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
 
 科學 run 完成後，所有報告、圖說與 metadata 解讀都必須以「2024–2025 全部可得樣本」描述，
 並引用每區 `metadata.json > input_surface.source_months`、`time_window` 與
-`parallel_execution` 所記錄的實際來源、覆蓋率與運算條件；不得稱為 24 個完整月份或無缺口年度資料。
+`parallel_execution` 所記錄的實際來源、覆蓋率與運算條件；還必須揭露
+`input_surface.time_axis_canonicalization`。不得稱為 24 個完整月份或無缺口年度資料。
 
 ## SVD 方法
 

@@ -2,7 +2,7 @@
   "schema_version": "1.0.0",
   "analysis_kind": "surface_multivariate_svd",
   "analysis_label": "beigan_surface_u_v_eta_available_2024_2025_v1",
-  "purpose": "2024–2025 年度全部可得資料成果：依 OCM-Data-Preprocessing 六個分析單元 v1，納入北竿核定區所有 ready 的 standard_month 與 standard_partial_month 表層 u、v、eta 樣本。來源缺日不跨斷點插補；本設定以 maximum_source_gap_hours=null 解除缺口長度上限，但仍要求 UTC 嚴格遞增並於 metadata 揭露實際時間覆蓋率、最大缺口與缺日月份。原北竿三個小候選框只作附屬局地位置。",
+  "purpose": "2024–2025 年度全部可得資料成果：依 OCM-Data-Preprocessing 六個分析單元 v1，納入北竿核定區所有 ready 的 standard_month 與 standard_partial_month 表層 u、v、eta 樣本。來源缺日不跨斷點插補；本設定解除缺口長度上限，並對不可考的跨月份倒序／重複 UTC 採穩定排序後每個 UTC 保留最後出現樣本的 canonicalization。metadata 必須揭露實際時間覆蓋率、最大缺口、重排與去重筆數。原北竿三個小候選框只作附屬局地位置。",
   "focus": {
     "focus_id": "beigan_surface_svd_aoi_v1",
     "name_zh": "北竿海域 SVD 核定區",
@@ -24,7 +24,8 @@
     "required_status": "ready",
     "required_cache_kinds": ["standard_month"],
     "expected_timestep_hours": 1.0,
-    "maximum_source_gap_hours": null
+    "maximum_source_gap_hours": null,
+    "time_axis_canonicalization_policy": "sort_and_deduplicate_prefer_last"
   },
   "mask_and_missing_data": {
     "static_ocean_mask": "mask_static.npy",

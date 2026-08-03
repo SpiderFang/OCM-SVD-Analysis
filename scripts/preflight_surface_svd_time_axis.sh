@@ -58,6 +58,7 @@ import numpy as np
 from ocm_svd_analysis.batch import load_batch_config
 from ocm_svd_analysis.surface_multivariate_svd import (
     _apply_known_time_axis_repairs,
+    _canonicalize_source_time_axis,
     _validate_month_metadata,
     _validate_source_time_axis,
 )
@@ -67,8 +68,9 @@ def main(batch_config_path: Path, surface_root: Path) -> int:
     """逐區驗證 24 個月 UTC 軸並印出可供 SERVER log 保存的單行摘要。
 
     此函式刻意不呼叫 load_surface_focus_data，因為後者會讀取 u/v/eta focus 小窗。預檢
-    的輸入只有 metadata 與一維 int64 時間軸，輸出為每區的中位步長、最大缺口與斷點數；
-    若失敗，例外文字沿用正式管線，讓修正設定後可直接重跑此腳本確認。
+    的輸入只有 metadata 與一維 int64 時間軸，輸出為每區的中位步長、最大缺口、斷點數及
+    canonicalization 的重排／去重筆數；若失敗，例外文字沿用正式管線，讓修正設定後可直接
+    重跑此腳本確認。
     """
 
     batch = load_batch_config(batch_config_path)
@@ -98,14 +100,15 @@ def main(batch_config_path: Path, surface_root: Path) -> int:
                     time_chunks.append(repaired_time)
 
             merged_time = np.concatenate(time_chunks)
-            if not np.all(np.diff(merged_time) > 0):
-                raise ValueError("跨月份 UTC 時軸有倒序或重複時次")
-            median_hours, maximum_gap_hours, gap_break_count = _validate_source_time_axis(merged_time, config)
+            canonical_time, _, canonicalization = _canonicalize_source_time_axis(merged_time, config)
+            median_hours, maximum_gap_hours, gap_break_count = _validate_source_time_axis(canonical_time, config)
             partial_text = ",".join(partial_month_ids) if partial_month_ids else "none"
             print(
                 f"OK   {region.analysis_unit_id} "
                 f"median={median_hours:.3g}h max_gap={maximum_gap_hours:.3g}h "
-                f"breaks={gap_break_count} partial_months={partial_text}"
+                f"breaks={gap_break_count} reordered={canonicalization.reordered_time_step_count} "
+                f"dropped_duplicates={canonicalization.dropped_duplicate_time_step_count} "
+                f"partial_months={partial_text}"
             )
         except Exception as error:
             failed = True
