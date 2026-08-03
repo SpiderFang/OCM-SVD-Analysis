@@ -90,7 +90,7 @@ class AnalysisConfig:
     required_status: str
     required_cache_kinds: frozenset[str]
     expected_timestep_hours: float
-    maximum_source_gap_hours: float
+    maximum_source_gap_hours: float | None
     known_time_axis_repairs: tuple[TimeAxisRepair, ...]
     minimum_static_ocean_cells: int
     minimum_cell_valid_fraction: float
@@ -173,7 +173,8 @@ class PreparedAnalysisData:
 
     `series` 的維度為 `(retained_time, component, ocean_cell)`；這個緊湊表示法避免把陸地
     與未選定的 bbox cell 放進矩陣。`imputed` 僅標記依法插補的短缺值，方便日後將其排除
-    做不補值敏感度分析。
+    做不補值敏感度分析。三個 `source_*` 欄位描述插補前、跨月份串接後的來源 UTC 軸；即使
+    全部可得設定解除最大缺口上限，也能在發布 metadata 中量化並揭露實際時間斷點。
     """
 
     time_utc_ns: np.ndarray
@@ -184,6 +185,9 @@ class PreparedAnalysisData:
     retained_time_fraction: float
     initial_time_count: int
     common_ocean_cell_count: int
+    source_median_timestep_hours: float
+    source_maximum_gap_hours: float
+    source_gap_break_count: int
 
 
 @dataclass(frozen=True)
@@ -521,7 +525,17 @@ def load_analysis_config(
     required_schema_major = _as_positive_int(input_config.get("required_cache_schema_major"), "input.required_cache_schema_major")
     _require(required_schema_major == SURFACE_CACHE_SCHEMA_MAJOR, f"本讀取器只接受 surface cache schema {SURFACE_CACHE_SCHEMA_MAJOR}.x")
     expected_timestep_hours = _as_float(input_config.get("expected_timestep_hours"), "input.expected_timestep_hours")
-    maximum_source_gap_hours = _as_float(input_config.get("maximum_source_gap_hours"), "input.maximum_source_gap_hours")
+    # 嚴格完整月契約以有限時數拒絕過長來源斷點；研究團隊若已核定「全部可得樣本」，
+    # 必須明確寫入 null 才會解除上限。欄位缺漏仍視為設定不完整，避免舊設定無意間變成
+    # 不限缺口；不論是否設上限，後續都會維持 UTC 軸嚴格遞增並把實際斷點寫入 metadata。
+    if "maximum_source_gap_hours" not in input_config:
+        raise ValueError("input.maximum_source_gap_hours 必須是有限正數或 null（null 表示接受所有嚴格遞增的來源時間缺口）")
+    maximum_source_gap_raw = input_config["maximum_source_gap_hours"]
+    if maximum_source_gap_raw is None:
+        maximum_source_gap_hours = None
+    else:
+        maximum_source_gap_hours = _as_float(maximum_source_gap_raw, "input.maximum_source_gap_hours")
+        _require(maximum_source_gap_hours > 0.0, "input.maximum_source_gap_hours 若非 null 必須為正數")
     known_time_axis_repairs = _load_known_time_axis_repairs(input_config, years, months, expected_timestep_hours)
 
     mask_config = raw.get("mask_and_missing_data")
@@ -862,8 +876,13 @@ def load_surface_focus_data(
     )
 
 
-def _validate_source_time_axis(time_utc_ns: np.ndarray, config: AnalysisConfig) -> tuple[float, float]:
-    """檢查整段資料的逐時節奏與最大時間缺口，回傳中位時間步與最大缺口（小時）。"""
+def _validate_source_time_axis(time_utc_ns: np.ndarray, config: AnalysisConfig) -> tuple[float, float, int]:
+    """檢查整段資料的逐時節奏與來源斷點，回傳中位步長、最大缺口與斷點數。
+
+    `maximum_source_gap_hours=None` 只解除「缺口長度」的拒絕條件，供已核定的全部可得
+    樣本分析使用；它不允許時間倒序、重複時次或非預期的中位採樣頻率。實際最大缺口與
+    斷點數仍會保留至成果 metadata，讓報告可如實揭露樣本母體的時間不連續性。
+    """
 
     _require(time_utc_ns.size >= 2, "SVD 至少需要兩個時間樣本")
     diffs_hours = np.diff(time_utc_ns).astype(np.float64) / 3_600_000_000_000.0
@@ -871,8 +890,10 @@ def _validate_source_time_axis(time_utc_ns: np.ndarray, config: AnalysisConfig) 
     maximum_hours = float(np.max(diffs_hours))
     tolerance = max(0.01, config.expected_timestep_hours * 0.01)
     _require(abs(median_hours - config.expected_timestep_hours) <= tolerance, f"時間軸中位步長 {median_hours:.6g} 小時，與設定逐時步長 {config.expected_timestep_hours:.6g} 不一致")
-    _require(maximum_hours <= config.maximum_source_gap_hours, f"最大來源時間缺口 {maximum_hours:.6g} 小時超過設定門檻 {config.maximum_source_gap_hours:.6g} 小時")
-    return median_hours, maximum_hours
+    gap_break_count = int(np.count_nonzero(diffs_hours > config.expected_timestep_hours + tolerance))
+    if config.maximum_source_gap_hours is not None:
+        _require(maximum_hours <= config.maximum_source_gap_hours, f"最大來源時間缺口 {maximum_hours:.6g} 小時超過設定門檻 {config.maximum_source_gap_hours:.6g} 小時")
+    return median_hours, maximum_hours, gap_break_count
 
 
 def _interpolate_short_gaps(values: np.ndarray, max_steps: int) -> tuple[np.ndarray, np.ndarray]:
@@ -922,7 +943,7 @@ def prepare_analysis_data(loaded: LoadedSurfaceData, config: AnalysisConfig) -> 
     線性代數運算。
     """
 
-    _validate_source_time_axis(loaded.time_utc_ns, config)
+    source_median_timestep_hours, source_maximum_gap_hours, source_gap_break_count = _validate_source_time_axis(loaded.time_utc_ns, config)
     triplet_valid = loaded.valid_surface & np.all(np.isfinite(loaded.fields), axis=1)
     cell_fraction = np.mean(triplet_valid, axis=0, dtype=np.float64)
     _require(loaded.analysis_geometry_mask.shape == loaded.mask_static.shape, "analysis geometry mask 必須與靜態海域遮罩對齊")
@@ -949,6 +970,9 @@ def prepare_analysis_data(loaded: LoadedSurfaceData, config: AnalysisConfig) -> 
         retained_time_fraction=retained_time_fraction,
         initial_time_count=int(loaded.time_utc_ns.size),
         common_ocean_cell_count=common_cell_count,
+        source_median_timestep_hours=source_median_timestep_hours,
+        source_maximum_gap_hours=source_maximum_gap_hours,
+        source_gap_break_count=source_gap_break_count,
     )
 
 
@@ -2450,6 +2474,15 @@ def run_surface_multivariate_svd(
                 ],
                 "known_time_axis_repairs": config.raw["input"].get("known_time_axis_repairs", []),
                 "repaired_time_step_count": loaded.repaired_time_step_count,
+                "source_time_axis": {
+                    "expected_timestep_hours": config.expected_timestep_hours,
+                    "median_timestep_hours": prepared.source_median_timestep_hours,
+                    "maximum_gap_hours": prepared.source_maximum_gap_hours,
+                    "gap_break_count": prepared.source_gap_break_count,
+                    "maximum_gap_limit_hours": config.maximum_source_gap_hours,
+                    "maximum_gap_policy": "unbounded_but_reported" if config.maximum_source_gap_hours is None else "bounded_and_validated",
+                    "semantics": "gap_break_count 計數相鄰 UTC 間隔大於預期步長加容差的來源斷點；解除上限時仍要求 UTC 軸嚴格遞增及中位步長符合設定。",
+                },
                 "raw_netcdf_read": False,
                 "materialized_flow_scope": "analysis bbox read window only; cell-center geometry mask excludes any I/O buffer cells from SVD",
             },

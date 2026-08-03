@@ -474,6 +474,41 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
 `--allow-partial-months`；程式仍會拒絕超過設定值（預設 2 小時）的實際時間缺口。`--allow-trial`
 只用於本機單日 smoke test，輸出會標示 `trial_pilot`。
 
+### 2024+2025 全部可得資料設定
+
+當研究團隊明確決定接受無法補齊的來源缺日，必須使用獨立的 `available_2024_2025` 科學
+契約，不能把嚴格完整月設定加上 `--allow-partial-months` 後直接混用。本版提供六份
+`*_surface_svd_available_2024_2025.json` 與
+[`configs/six_regions_surface_svd_available_2024_2025_batch.json`](./configs/six_regions_surface_svd_available_2024_2025_batch.json)。
+
+這組設定保留上游 `ready` 月份中的 `standard_month` 與經 CLI 明確授權的
+`standard_partial_month`，不跨來源斷點插補，並以 `maximum_source_gap_hours: null` 明確解除
+來源缺口長度上限。這不是忽略時間品質：程式仍拒絕 UTC 倒序、重複時次或中位採樣步長不符，
+且會把每區實際最大缺口、斷點數與時間覆蓋率寫入 `metadata.json > input_surface.source_time_axis`。
+龜山島與貢寮的共用東北臺灣 cache 另明載 `202507` 前 24 筆 UTC 時間座標的已知修正規則。
+
+正式 SVD 前應先執行唯讀預檢器；它只讀 24 個月的 `metadata.json` 與
+`time_utc_ns.npy`，逐區列出 partial 月份、最大來源缺口與斷點數，不建立 output 目錄：
+
+```bash
+./scripts/preflight_surface_svd_time_axis.sh
+```
+
+預檢六區均為 `OK` 後，再啟動正式 batch：
+
+```bash
+uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
+  --batch-config configs/six_regions_surface_svd_available_2024_2025_batch.json \
+  --surface-root "$OCM_SURFACE_ROOT" \
+  --output-root "$SVD_OUTPUT_ROOT" \
+  --allow-partial-months \
+  --no-figures
+```
+
+科學 run 完成後，所有報告、圖說與 metadata 解讀都必須以「2024–2025 全部可得樣本」描述，
+並引用每區 `metadata.json > input_surface.source_months`、`time_window` 與
+`parallel_execution` 所記錄的實際來源、覆蓋率與運算條件；不得稱為 24 個完整月份或無缺口年度資料。
+
 ## SVD 方法
 
 ### SVD 矩陣建立順序：陸地與 NaN 不可進入矩陣

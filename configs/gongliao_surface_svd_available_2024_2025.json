@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0.0",
+  "analysis_kind": "surface_multivariate_svd",
+  "analysis_label": "gongliao_surface_u_v_eta_available_2024_2025_v1",
+  "purpose": "2024–2025 年度全部可得資料成果：依 OCM-Data-Preprocessing 六個分析單元 v1，納入貢寮候選區所有 ready 的 standard_month 與 standard_partial_month 表層 u、v、eta 樣本。來源缺日不跨斷點插補；本設定以 maximum_source_gap_hours=null 解除缺口長度上限，但仍要求 UTC 嚴格遞增並於 metadata 揭露實際時間覆蓋率、最大缺口與缺日月份。此設定不可作為正式保護區 AOI 結論。",
+  "focus": {
+    "focus_id": "gongliao_coastal_candidate_v3",
+    "name_zh": "貢寮海域候選框",
+    "approval_status": "candidate",
+    "flow_domain_id": "northeast_taiwan_common_cache_v3",
+    "bbox_lon_lat": [121.91, 122.06, 25.0, 25.15],
+    "bbox_order": "lon_min, lon_max, lat_min, lat_max",
+    "anchor_lonlat": [121.92807, 25.11245],
+    "analysis_unit_id": "gongliao_surface_svd_candidate_v3",
+    "source_analysis_units_config": "OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json",
+    "source_analysis_units_config_sha256": "4af676a1560833c19f527432ca57d4e4bf0a83cdf79a1e32aa1f471fba7f7c28",
+    "spatial_mask_policy": "analysis_bbox_cell_center",
+    "source_focus_plan": "OCM-Data-Preprocessing/configs/ocm_focus_bboxes_candidate_v3.json"
+  },
+  "input": {
+    "years": [2024, 2025],
+    "months": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    "required_cache_schema_major": 3,
+    "required_status": "ready",
+    "required_cache_kinds": ["standard_month"],
+    "expected_timestep_hours": 1.0,
+    "maximum_source_gap_hours": null,
+    "known_time_axis_repairs": [
+      {
+        "month": "202507",
+        "start_index": 0,
+        "stop_index": 24,
+        "shift_hours": 24.0,
+        "expected_original_start_utc": "2025-06-30T01:00:00Z",
+        "expected_original_end_utc": "2025-07-01T00:00:00Z",
+        "reason": "202507 前 24 筆來源時間座標錯標；只在分析記憶體中平移 24 小時，恢復跨月嚴格遞增 UTC 軸，不改上游 u/v/eta/valid 數值。"
+      }
+    ]
+  },
+  "mask_and_missing_data": {
+    "static_ocean_mask": "mask_static.npy",
+    "minimum_static_ocean_cells": 80,
+    "minimum_cell_triplet_valid_fraction": 0.95,
+    "max_consecutive_missing_timesteps_to_interpolate": 2,
+    "minimum_retained_time_fraction": 0.9
+  },
+  "svd": {
+    "variables": ["u_surface_mps", "v_surface_mps", "eta_m"],
+    "anomaly_reference": "each_selected_grid_cell_time_mean_over_retained_available_2024_2025_samples",
+    "normalization": "u_v_share_area_weighted_vector_rms__eta_uses_area_weighted_rms",
+    "spatial_weight": "sqrt(cell_area_m2), repeated for u, v, eta",
+    "requested_mode_count": 20,
+    "minimum_reported_mode_count": 5,
+    "sign_convention": "anchor u loading positive; if its magnitude is numerically negligible, use anchor v, then eta, then the largest absolute loading"
+  },
+  "parallel_execution": {
+    "io_workers": 4,
+    "linear_algebra_threads": 4,
+    "policy": "單區以 4 個 I/O worker 平行讀取 2024–2025 共 24 個月檔；來源缺日不跨斷點插補，後續以 4 個受控 BLAS 執行緒求解。"
+  },
+  "figures": {
+    "style": "academic_report_ready_v6",
+    "mode_count": 5,
+    "max_quiver_arrows_per_axis": 16,
+    "output_formats": ["png", "svg"],
+    "raster_dpi": 300,
+    "coastline_geojson": "OCM-Data-Preprocessing/data/coastline/osm_land_polygons_taiwan_v1.geojson",
+    "coastline_geojson_sha256": "9e2e0ac9bc527aca87d89332cd428fdcb776eefbf94a85dd70f887f729b95fdd"
+  }
+}

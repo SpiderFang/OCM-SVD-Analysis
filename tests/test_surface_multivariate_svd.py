@@ -42,6 +42,7 @@ def make_config(
     analysis_unit_id: str = "synthetic_surface_svd_aoi_v1",
     years: tuple[int, ...] | None = None,
     known_time_axis_repairs: list[dict[str, object]] | None = None,
+    maximum_source_gap_hours: float | None = 2.0,
 ) -> None:
     """建立最小但完整的三變數 SVD 設定，驗證 3×3 AOI 與五個輸出模態。
 
@@ -49,6 +50,8 @@ def make_config(
     `analysis_bbox_cell_center` 政策確實只讓中間 3×3 cell center 進入共同有效遮罩，而
     不會因讀取小窗外擴把外圈錯放入 SVD。另建立一個只覆蓋左上角的合成 GeoJSON
     陸地 polygon，確認正式圖會加入海岸線，但不會把圖面陸地寫回科學遮罩。
+    `maximum_source_gap_hours=None` 用於驗證已核定的全部可得樣本可解除長缺口拒絕，
+    但實際斷點仍必須寫入 metadata 供研究報告揭露。
     """
 
     coastline_path = path.parent / "synthetic_land.geojson"
@@ -103,7 +106,7 @@ def make_config(
                 "required_status": "ready",
                 "required_cache_kinds": ["standard_month"],
                 "expected_timestep_hours": 1.0,
-                "maximum_source_gap_hours": 2.0,
+                "maximum_source_gap_hours": maximum_source_gap_hours,
                 **({"known_time_axis_repairs": known_time_axis_repairs} if known_time_axis_repairs is not None else {}),
             },
             "mask_and_missing_data": {
@@ -527,6 +530,36 @@ class SurfaceMultivariateSvdTest(unittest.TestCase):
                 ["202401", "202402", "202501", "202502"],
             )
             self.assertEqual(metadata["parallel_execution"]["io_workers_used"], 2)
+
+    def test_available_samples_config_can_report_but_not_limit_a_long_source_gap(self) -> None:
+        """全部可得設定以 null 解除上限，但必須保留可稽核的實際來源斷點。
+
+        第二個合成月刻意往後平移 24 小時，使月界從逐時資料變成 25 小時缺口。這模擬
+        `standard_partial_month` 的來源不連續：嚴格設定應拒絕，研究團隊明確核定的
+        `maximum_source_gap_hours=null` 則可完成 SVD，且 metadata 必須留下最大缺口與斷點數，
+        不能因解除拒絕條件而遺失報告所需的資料品質證據。
+        """
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config_path = root / "available_samples_config.json"
+            make_config(
+                config_path,
+                analysis_label="synthetic_available_samples",
+                maximum_source_gap_hours=None,
+            )
+            result_dir = run_surface_multivariate_svd(
+                config_path=config_path,
+                surface_root=make_surface_cache(root, second_month_time_shift_hours=24),
+                output_root=root / "derived",
+                make_figures=False,
+            )
+            metadata = json.loads((result_dir / "metadata.json").read_text(encoding="utf-8"))
+            source_axis = metadata["input_surface"]["source_time_axis"]
+            self.assertIsNone(source_axis["maximum_gap_limit_hours"])
+            self.assertEqual(source_axis["maximum_gap_policy"], "unbounded_but_reported")
+            self.assertEqual(source_axis["maximum_gap_hours"], 25.0)
+            self.assertEqual(source_axis["gap_break_count"], 1)
 
     def test_known_time_axis_repair_requires_expected_original_bounds_and_preserves_samples(self) -> None:
         """已知月界錯標只能在原始 UTC 完全吻合時平移，且不得刪除或複製流場樣本。
