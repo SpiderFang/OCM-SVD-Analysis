@@ -321,7 +321,7 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd-fixed-depth-replot \
 
 ### 32 核 SERVER：六區並行批次
 
-[`configs/six_regions_surface_svd_2025_batch.json`](/Users/mustlab/Workspace/OCM-SVD-Analysis/configs/six_regions_surface_svd_2025_batch.json)
+[`configs/six_regions_surface_svd_2025_batch.json`](./configs/six_regions_surface_svd_2025_batch.json)
 是六區 2025 的受控並行計畫：同時執行 6 個獨立 process，每區 4 個 BLAS 執行緒，故密集
 線性代數最高使用 **24 核**；其餘至少 8 核保留給作業系統、memory-map page fault 與網路
 儲存 I/O。每區的 4 個 I/O worker 只在讀月檔階段存在，BLAS 階段不會與同區 I/O worker
@@ -432,9 +432,18 @@ run，再以此命令產生報告圖；後續修改 renderer 時只重繪 bundle
 
 ### 2024+2025 合併設定
 
-讀取器已支援以 `input.years` 依「年份、月份」順序平行讀取 24 個完整月檔；2024 快取驗收
-完成後，請由相對應的 2025 區域設定建立新的 `2024_2025` JSON（不可覆寫既有 2025 設定），
-只將 input 段改為：
+讀取器已支援以 `input.years` 依「年份、月份」順序平行讀取 24 個完整月檔。本 repository
+已提供六份不可與既有 2025 設定互相覆寫的雙年度設定，以及其受控平行 batch：
+
+- `configs/guishan_surface_svd_2024_2025.json`
+- `configs/gongliao_surface_svd_2024_2025.json`
+- `configs/hsinchu_surface_svd_2024_2025.json`
+- `configs/houwan_nmmba_surface_svd_2024_2025.json`
+- `configs/beigan_surface_svd_2024_2025.json`
+- `configs/nangan_surface_svd_2024_2025.json`
+- `configs/six_regions_surface_svd_2024_2025_batch.json`
+
+每份單區設定的 input 段為：
 
 ```json
 "input": {
@@ -448,8 +457,17 @@ run，再以此命令產生報告圖；後續修改 renderer 時只重繪 bundle
 }
 ```
 
-同時應把 `analysis_label` 與 batch `batch_label` 改成包含 `2024_2025` 的新名稱。輸出會保存
-24 個來源月份 metadata hash，且測試已驗證讀取順序為 2024-01…2024-12、2025-01…2025-12。
+各 `analysis_label` 與 batch `batch_label` 都已包含 `2024_2025`。輸出會保存 24 個來源月份
+metadata hash，且測試已驗證讀取順序為 2024-01…2024-12、2025-01…2025-12。以至少 32 核
+SERVER 執行數值成果（暫不繪圖）時，使用：
+
+```bash
+uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
+  --batch-config configs/six_regions_surface_svd_2024_2025_batch.json \
+  --surface-root "$OCM_SURFACE_ROOT" \
+  --output-root "$SVD_OUTPUT_ROOT" \
+  --no-figures
+```
 
 若某月份是 `standard_partial_month`，預設會拒絕執行。只有研究團隊已決定接受缺日時才加
 `--allow-partial-months`；程式仍會拒絕超過設定值（預設 2 小時）的實際時間缺口。`--allow-trial`

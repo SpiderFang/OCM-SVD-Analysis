@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0.0",
+  "analysis_kind": "surface_multivariate_svd",
+  "analysis_label": "nangan_surface_u_v_eta_2024_2025_aoi_v1",
+  "purpose": "依 OCM-Data-Preprocessing 六個分析單元 v1，以 schema 3.0 surface cache 的表層 u、v、eta 建立南竿核定區 2024–2025 年三變數、面積加權、標準化 SVD。原南竿四個小候選框只作附屬局地位置，不另建獨立五模態成果。",
+  "focus": {
+    "focus_id": "nangan_surface_svd_aoi_v1",
+    "name_zh": "南竿海域 SVD 核定區",
+    "approval_status": "approved",
+    "flow_domain_id": "lienchiang_common_cache_v3",
+    "bbox_lon_lat": [119.88, 120.0, 26.1, 26.18],
+    "bbox_order": "lon_min, lon_max, lat_min, lat_max",
+    "anchor_lonlat": [119.956, 26.147],
+    "analysis_unit_id": "nangan_surface_svd_aoi_v1",
+    "source_analysis_units_config": "OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json",
+    "source_analysis_units_config_sha256": "4af676a1560833c19f527432ca57d4e4bf0a83cdf79a1e32aa1f471fba7f7c28",
+    "spatial_mask_policy": "analysis_bbox_cell_center",
+    "subordinate_focus_ids": ["nangan_huangguan_yu_candidate_v3", "nangan_hanlin_jiao_candidate_v3", "nangan_fuxing_candidate_v3", "nangan_airport_south_candidate_v3"]
+  },
+  "input": {
+    "years": [2024, 2025],
+    "months": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    "required_cache_schema_major": 3,
+    "required_status": "ready",
+    "required_cache_kinds": ["standard_month"],
+    "expected_timestep_hours": 1.0,
+    "maximum_source_gap_hours": 2.0
+  },
+  "mask_and_missing_data": {
+    "static_ocean_mask": "mask_static.npy",
+    "minimum_static_ocean_cells": 60,
+    "minimum_cell_triplet_valid_fraction": 0.95,
+    "max_consecutive_missing_timesteps_to_interpolate": 2,
+    "minimum_retained_time_fraction": 0.9
+  },
+  "svd": {
+    "variables": ["u_surface_mps", "v_surface_mps", "eta_m"],
+    "anomaly_reference": "each_selected_grid_cell_time_mean_over_retained_2024_2025_samples",
+    "normalization": "u_v_share_area_weighted_vector_rms__eta_uses_area_weighted_rms",
+    "spatial_weight": "sqrt(cell_area_m2), repeated for u, v, eta",
+    "requested_mode_count": 20,
+    "minimum_reported_mode_count": 5,
+    "sign_convention": "anchor u loading positive; if its magnitude is numerically negligible, use anchor v, then eta, then the largest absolute loading"
+  },
+  "parallel_execution": {
+    "io_workers": 4,
+    "linear_algebra_threads": 4,
+    "policy": "單區以 4 個 I/O worker 平行讀取 2024–2025 共 24 個月檔，後續以 4 個受控 BLAS 執行緒求解；六區批次由 batch 設定協調為至多 24 個 BLAS 核心。"
+  },
+  "figures": {
+    "style": "academic_report_ready_v6",
+    "mode_count": 5,
+    "max_quiver_arrows_per_axis": 16,
+    "output_formats": ["png", "svg"],
+    "raster_dpi": 300,
+    "coastline_geojson": "OCM-Data-Preprocessing/data/coastline/osm_land_polygons_taiwan_v1.geojson",
+    "coastline_geojson_sha256": "9e2e0ac9bc527aca87d89332cd428fdcb776eefbf94a85dd70f887f729b95fdd"
+  }
+}
