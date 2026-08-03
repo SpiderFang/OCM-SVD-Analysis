@@ -344,6 +344,7 @@ uv run ocm-svd-batch \
   --output-root "$SVD_OUTPUT_ROOT"
 ```
 
+搭配指令入口的說明圖表對照 [`docs/ocm-svd-batch.png`](./docs/ocm-svd-batch.png)
 批次結束會輸出單行 JSON，列出六個 analysis unit 的成果路徑；各區仍各自以原子目錄發布。
 若中途失敗，未開始的區域會取消，已完成的區域不刪除；排除原因後重跑時必須明確加
 `--skip-existing` 才會重用不可覆寫的既有成果。JSON 另含整批 `total_elapsed_seconds`
