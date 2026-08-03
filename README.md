@@ -108,21 +108,31 @@ ocm_surface/
 
 ## SERVER 執行
 
-在 SERVER 的 SVD 專案目錄執行。請將兩個環境變數替換為實際掛載點；程式、設定與輸出
-均不硬編碼 SERVER 絕對路徑。
+在 SERVER 的 SVD 專案目錄執行。完整 native cache 保留在 SERVER，不必下載到本機；
+只需要同步程式碼，運算完成後再下載不可變的成果目錄。本專案以 `.python-version`
+固定 Python 3.12.13，並以 `uv.lock` 固定套件解析結果。
+
+以下設定會把 uv 管理的 Python、虛擬環境及套件快取放在使用者可寫的獨立目錄。即使
+shell 提示字仍顯示 `(base)`，`UV_PROJECT_ENVIRONMENT`、`UV_MANAGED_PYTHON=1` 及命令列
+的 `--python 3.12.13` 仍會使本專案避開 `/home/mustlab/anaconda3/bin/python`；不需要
+修改或移除 SERVER 原有 Anaconda。
 
 ```bash
-cd /path/to/OCM-SVD-Analysis
+cd /home/mustlab/Workspace/OCM-SVD-Analysis
 
-export OCM_SURFACE_ROOT=/path/to/preprocessed/ocm_surface
-export SVD_OUTPUT_ROOT=/path/to/derived
-export UV_CACHE_DIR=/tmp/ocm-svd-analysis-uv-cache
-export MPLCONFIGDIR=/tmp/ocm-svd-analysis-matplotlib-cache
+export UV_CACHE_DIR=/home/mustlab/work/uv-cache/ocm-svd-analysis
+export UV_PROJECT_ENVIRONMENT=/home/mustlab/work/venvs/ocm-svd-analysis-py312
+export UV_MANAGED_PYTHON=1
+export MPLCONFIGDIR=/home/mustlab/work/matplotlib-cache/ocm-svd-analysis
 export PYTHONDONTWRITEBYTECODE=1
 
-uv sync --locked
+uv python install 3.12.13
+uv sync --frozen --python 3.12.13 --managed-python
 
-uv run ocm-svd \
+export OCM_SURFACE_ROOT=/home/mustlab/data/OCM-Preprocessed-Data/preprocessed/ocm_surface
+export SVD_OUTPUT_ROOT=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results
+
+uv run --frozen --no-sync --python 3.12.13 ocm-svd \
   --config configs/gongliao_surface_svd_2025.json \
   --surface-root "$OCM_SURFACE_ROOT" \
   --output-root "$SVD_OUTPUT_ROOT"
@@ -145,7 +155,7 @@ SERVER 現有貢寮上游共用快取在 2025 年 3、5、7、11 月包含缺日
 東北臺灣共用 flow domain，也不會跨缺日插補：
 
 ```bash
-uv run ocm-svd \
+uv run --frozen --no-sync --python 3.12.13 ocm-svd \
   --config configs/gongliao_surface_svd_available_2025.json \
   --surface-root "$OCM_SURFACE_ROOT" \
   --output-root "$SVD_OUTPUT_ROOT" \
@@ -165,9 +175,134 @@ uv run ocm-svd \
 修正，且只改分析記憶體中的 UTC 座標，不覆寫上游 `.npy`、不重排樣本，也不改變
 u/v/eta/valid 數值；套用規則與修正樣本數會寫入成果 metadata。
 
+### 貢寮固定深度 `u(z)/v(z)/eta` 垂向比較 family
+
+固定深度分析不是把 SCHISM layer index 5、10、20 當成水深，也不是替每個深度建立另一個
+`eta`。設定
+[`configs/gongliao_fixed_depth_svd_available_2025.json`](/Users/mustlab/Workspace/OCM-SVD-Analysis/configs/gongliao_fixed_depth_svd_available_2025.json)
+定義四個可比較層位：
+
+- 共同遮罩表層參考：`u_surface/v_surface/eta`；
+- 固定 `z=-5 m`：`u(z=-5)/v(z=-5)/eta`；
+- 固定 `z=-10 m`：`u(z=-10)/v(z=-10)/eta`；
+- 固定 `z=-20 m`：`u(z=-20)/v(z=-20)/eta`。
+
+其中只有 `u/v` 使用 paired native cache 的逐時 `zcor(time,node,layer)` 垂向內插。
+`eta` 直接讀取同月
+`ocm_surface/northeast_taiwan_common_cache_v3/months/<YYYYMM>/eta_m.npy`；它源自
+SCHISM `elev(time,node) [m]` 經既有 Delaunay 重心水平內插，沒有垂向維度。固定深度
+管線會要求 surface/native `time_utc_ns.npy` 逐值相同，並拒絕把表層
+`valid_mask_surface.npy` 直接當成深層遮罩。
+
+為了讓模態差異可歸因於垂向流場，而不是不同格點或時間母體，這個 family 固定採
+`intersection_with_surface`：
+
+1. 每個固定深度只在 `zcor/u/v` 都有限且有上下包夾層時線性內插；不做單側、海床以下
+   或海面以上外插。
+2. 每個層位的三變數有效條件都是 `finite(u) AND finite(v) AND finite(eta)`。
+3. 表層、-5、-10、-20 m 都達到年度有效率門檻的格點才進入 `shared_valid_mask.npy`。
+4. 短缺值處理後，四個層位都完整的時次才進入各自 SVD。
+5. 四組 SVD 沿用相同面積權重、u/v 與 eta RMS 正規化、模式數和 sign anchor。
+
+這個共同遮罩表層參考不覆寫既有 272 格完整表層 run。完整表層 run 用來描述全部可用
+表層海域；family 中的表層參考只用來和三個固定深度作同母體比較。
+
+在 SERVER 執行：
+
+```bash
+export OCM_NATIVE_ROOT=/home/mustlab/data/OCM-Preprocessed-Data/preprocessed/ocm_native
+export OCM_SURFACE_ROOT=/home/mustlab/data/OCM-Preprocessed-Data/preprocessed/ocm_surface
+export SVD_OUTPUT_ROOT=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-07-31
+
+uv run --frozen --no-sync --python 3.12.13 ocm-svd-fixed-depth \
+  --config configs/gongliao_fixed_depth_svd_available_2025.json \
+  --native-root "$OCM_NATIVE_ROOT" \
+  --surface-root "$OCM_SURFACE_ROOT" \
+  --output-root "$SVD_OUTPUT_ROOT" \
+  --allow-partial-months
+```
+
+輸出採 family 結構，整組完成後才原子發布：
+
+```text
+$SVD_OUTPUT_ROOT/fixed_depth_svd/<analysis_label_vN>/
+├── shared_valid_mask.npy
+├── time_utc_ns.npy
+├── metadata.json
+└── levels/
+    ├── surface_reference/
+    ├── z_minus_005p00m/
+    ├── z_minus_010p00m/
+    └── z_minus_020p00m/
+```
+
+每個固定深度 level 另存 `vertical_bracket_span_m.npy`，表示逐時、逐格水平內插後的上下
+`zcor` 包夾距離。這是垂向解析度 QC，不是速度或 layer 厚度；無包夾層處為 NaN。
+詳細方法、`eta` 來源鏈、遮罩語意與正式報告限制見
+[`docs/gongliao_2025_fixed_depth_svd_method.md`](/Users/mustlab/Workspace/OCM-SVD-Analysis/docs/gongliao_2025_fixed_depth_svd_method.md)。
+
+#### 2026-07-31 全年 SERVER 實跑結果
+
+上述命令已用 uv 管理的 Python 3.12.13 完成 2025 全部可得資料，不是 Anaconda
+Python。可讀、不可覆寫的固定深度版本 ID 為
+`gongliao_focus_bbox_surface_reference_fixed_z_005_010_020_u_v_eta_available_2025_v1`；
+成果已從 SERVER 下載至
+[`outputs/server_results/2026-07-31/fixed_depth_svd/gongliao_focus_bbox_surface_reference_fixed_z_005_010_020_u_v_eta_available_2025_v1`](/Users/mustlab/Workspace/OCM-SVD-Analysis/outputs/server_results/2026-07-31/fixed_depth_svd/gongliao_focus_bbox_surface_reference_fixed_z_005_010_020_u_v_eta_available_2025_v1)。
+
+固定深度科學成果與完整表層成果採獨立父目錄及獨立分析版本：前者位於
+`fixed_depth_svd/`，後者位於 `svd/`，不互相覆寫。固定深度 `analysis_label` 必須以
+`_vN` 結尾，完整 64 字元科學內容身分存於 `metadata.json >
+science_provenance_sha256`；設定或來源若改變，必須提升版本號，目錄尾端不再附加短 hash。
+
+實跑品管與資源紀錄如下：
+
+- 8,514 個來源可得時次中，四層共同保留 8,442 個（99.15%）；共同海域為 206 格。
+- 四層的 `time_utc_ns.npy`、`shared_valid_mask.npy` 與 `mean_eta_m.npy` 逐值完全相同；
+  因此深度間差異來自配對的流速場，不是不同 `eta` 或不同分析母體。
+- 總牆鐘時間 1:57:54，峰值 RSS 約 15.13 GiB，未使用 swap。
+- paired native/surface 月檔讀取與垂向內插耗時 7,030.42 秒；共同遮罩處理 1.43 秒；
+  四組 SVD 求解與場量推導合計僅 1.82 秒。
+- 整理後的科學 family 共 91 個檔案、111.12 MiB，含 85 個 NPY 與 6 個 JSON；舊式
+  內嵌圖面已移出，正式圖只存在獨立 figure bundle，因此不會和完整表層成果混用。
+  大型 paired native cache 仍不需要搬到本機。
+
+效能瓶頸不是 SVD，而是從 NFS 上的 native 大陣列讀取 712 個分散 source nodes。
+這些節點只占來源軸約 1.05%，但索引密度約 7%，分成 291 個不連續區段，會放大 mmap
+分頁讀取。若後續要縮短時間，應優先把 focus 所需 source-node 連續區段預裁成小型
+年度／月快取；增加 SVD 線性代數執行緒幾乎不會改善這次約兩小時的總耗時。
+
 繪圖器會依主機實際安裝字型依序選擇 macOS 繁中字型、Ubuntu 常見的
 `Noto Sans CJK TC`／`Noto Serif CJK TC`，最後才退回 `DejaVu Sans`。因此 SERVER 已安裝
 Noto CJK 時，繁中標題不需另行下載字型，也不會把系統字型複製進成果目錄。
+
+#### 固定深度成果只重繪圖面
+
+已完成的固定深度 family 若只需補比例尺或 coverage 圖，不應再次讀取大型 paired cache、
+垂向內插或求解 SVD。重繪器以唯讀 memory-map 使用既有四層平均場、回歸模態、PC、
+時間軸、逐格有效率及共同遮罩：
+
+```bash
+uv run --frozen --no-sync --python 3.12.13 ocm-svd-fixed-depth-replot \
+  --run-dir "$SVD_OUTPUT_ROOT/fixed_depth_svd/<analysis_label_vN>" \
+  --output-root "$SVD_OUTPUT_ROOT"
+```
+
+圖包發布至
+`fixed_depth_svd_figure_bundles/<analysis_label_vN>/<figure-style>/`，來源 family
+不新增圖檔、不改 metadata，也不複製科學陣列。同一 style 已存在時會拒絕覆寫；視覺規格
+若再改變，必須先提升 `figures.style`。
+
+每個層位的平均場及空間模態都同時提供不含比例尺的標準圖、
+`*_vector_scale_transparent.*` 透明後製素材，以及可直接放報告的
+`*_with_vector_scale.*` 完整圖。固定深度模態標題另明示其 u/v 深度；所有層位的 `eta`
+仍是同時次的唯一自由水面高度。
+
+2026-07-31 的貢寮 v6 圖包已建立於
+[`outputs/server_results/2026-07-31/fixed_depth_svd_figure_bundles/gongliao_focus_bbox_surface_reference_fixed_z_005_010_020_u_v_eta_available_2025_v1/academic_report_ready_v6`](/Users/mustlab/Workspace/OCM-SVD-Analysis/outputs/server_results/2026-07-31/fixed_depth_svd_figure_bundles/gongliao_focus_bbox_surface_reference_fixed_z_005_010_020_u_v_eta_available_2025_v1/academic_report_ready_v6)。
+其中 `fixed_depth_shared_coverage_qc_report.*` 顯示表層、-5 m、-10 m 各有
+272/272 格達到 95% 年度有效率門檻，-20 m 為 206/272 格，故四層共同交集為 206 格、
+排除 66 格。這 66 格在科學空間圖中維持缺值，不補值、不外插；QC 圖以橙色說明其排除
+來源，不能解讀成陸地。本機只讀既有陣列重繪共耗時約 19.53 秒。
 
 ## 平行化執行
 
@@ -536,9 +671,10 @@ PYTHONDONTWRITEBYTECODE=1 \
 uv run python3 -m unittest discover -s tests -v
 ```
 
-目前 9 個測試以合成 schema 3 surface cache 驗證五模態輸出、面積權重正交性、完整重建、
-短缺值插補、逐階段計時、單區 immutable 重繪、兩區平行重繪與拒絕覆寫；不需要大型
-SERVER 資料或 raw NetCDF。
+測試套件以合成 schema 3 surface cache 驗證五模態輸出、面積權重正交性、完整重建、
+短缺值插補、逐階段計時、單區 immutable 重繪、兩區平行重繪與拒絕覆寫；另以 paired
+native/surface cache 驗證固定 z 線性內插、不外插、`eta_m` 原值配對，以及表層與三個
+固定深度共用格點／時間交集。不需要大型 SERVER 資料或 raw NetCDF。
 
 ## 下一階段
 

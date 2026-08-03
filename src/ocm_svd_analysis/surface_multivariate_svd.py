@@ -412,17 +412,27 @@ def _load_known_time_axis_repairs(
     return tuple(repairs)
 
 
-def load_analysis_config(config_path: Path) -> AnalysisConfig:
-    """讀取並驗證表層三變數 SVD 設定。
+def load_analysis_config(
+    config_path: Path,
+    *,
+    expected_analysis_kind: str = "surface_multivariate_svd",
+    expected_variables: tuple[str, str, str] = ("u_surface_mps", "v_surface_mps", "eta_m"),
+) -> AnalysisConfig:
+    """讀取並驗證三變數 SVD 的共用設定。
 
-    本函式刻意不接受未列於設定的分析變數、bbox 順序或來源年月。這讓明日的貢寮 pilot
-    可被完整重跑；`input.year` 是既有單年設定的相容寫法，新的兩年分析必須以
-    `input.years: [2024, 2025]` 明確建立另一份有版本的設定檔。
+    預設仍只接受表層 `u/v/eta`，維持既有 CLI 與重繪器的嚴格契約。固定深度管線會
+    顯式傳入自己的 `analysis_kind` 與欄位名稱；兩類分析因而可共用年份、focus bbox、
+    缺值門檻、面積權重、圖面與 provenance 驗證，又不必把固定深度偽裝成表層資料。
+    `input.year` 是既有單年設定的相容寫法，新的多年度分析仍須使用
+    `input.years: [2024, 2025]` 明確列出來源年份。
     """
 
     raw = _read_json_object(config_path)
     _require(raw.get("schema_version") == CONFIG_SCHEMA_VERSION, f"設定檔必須使用 schema {CONFIG_SCHEMA_VERSION}")
-    _require(raw.get("analysis_kind") == "surface_multivariate_svd", "analysis_kind 必須是 surface_multivariate_svd")
+    _require(
+        raw.get("analysis_kind") == expected_analysis_kind,
+        f"analysis_kind 必須是 {expected_analysis_kind}",
+    )
 
     label = raw.get("analysis_label")
     if not isinstance(label, str) or not label.strip():
@@ -522,7 +532,10 @@ def load_analysis_config(config_path: Path) -> AnalysisConfig:
     svd_config = raw.get("svd")
     if not isinstance(svd_config, dict):
         raise ValueError("svd 必須是物件")
-    _require(svd_config.get("variables") == ["u_surface_mps", "v_surface_mps", "eta_m"], "SVD variables 必須固定為 u_surface_mps、v_surface_mps、eta_m")
+    _require(
+        svd_config.get("variables") == list(expected_variables),
+        f"SVD variables 必須固定為 {', '.join(expected_variables)}",
+    )
 
     parallel_config = raw.get("parallel_execution")
     if not isinstance(parallel_config, dict):
@@ -1411,6 +1424,10 @@ def _make_figures(
     time_utc_ns: np.ndarray,
     explained_variance: np.ndarray,
     config: AnalysisConfig,
+    *,
+    velocity_context_zh: str = "海表流",
+    mean_asset_stem: str = "mean_surface_flow_report",
+    mean_asset_key: str = "mean_surface_flow",
 ) -> list[str]:
     """產生可直接用於簡報與技術報告的白底完整標示圖。
 
@@ -1421,6 +1438,10 @@ def _make_figures(
     向量參考尺另存成同 stem 的 `_vector_scale_transparent` 全透明後製素材；另輸出
     `_with_vector_scale` 完整備用圖，把參考尺直接畫在主圖右下角。不提供白底獨立
     比例尺、無文字主圖圖層，也不顯示容易被誤認為測站的 SVD 正負號 anchor。
+
+    `velocity_context_zh` 只改變圖面與指南對速度層位的文字，例如固定深度管線會傳入
+    「固定深度 -5 m 流」；`eta` 仍維持唯一自由水面高度。檔名與 metadata key 亦可由
+    呼叫端分開指定，避免固定深度成果被誤標為表層平均流。
 
     PC 遇到來源缺日會斷線，不能用直線跨越沒有資料的時段。PNG 供快速預覽，SVG 保留箭頭
     與曲線向量結構。主圖固定輸出不透明白底；只有檔名明示 `_transparent` 的參考尺
@@ -1837,7 +1858,7 @@ def _make_figures(
         mean_vector_scale_transparent_paths,
         mean_with_vector_scale_paths,
     ) = add_report_vector_map(
-        "mean_surface_flow_report",
+        mean_asset_stem,
         mean_eta,
         mean_u,
         mean_v,
@@ -1845,13 +1866,13 @@ def _make_figures(
         color_limits=mean_color_limits,
         vector_reference=mean_vector_reference,
         quiver_scale=mean_quiver_scale,
-        title=f"{config.focus_name_zh}：{_configured_year_label(config)} 全部可得樣本平均海表流與海面高度",
+        title=f"{config.focus_name_zh}：{_configured_year_label(config)} 全部可得樣本平均{velocity_context_zh}與海面高度",
         colorbar_label="平均海面高度 η（m）",
         # 比例尺獨立圖使用純文字 `m/s` 而不啟動 Matplotlib mathtext parser；後者在
         # 六區平行重繪時可能競爭共用 parser cache，且部分本機 CJK 字型缺少上標負號。
         vector_unit_label="m/s",
     )
-    asset_metadata["mean_surface_flow"] = {
+    asset_metadata[mean_asset_key] = {
         "report_files": mean_report_paths,
         "vector_scale_transparent_report_files": mean_vector_scale_transparent_paths,
         "with_vector_scale_report_files": mean_with_vector_scale_paths,
@@ -1911,6 +1932,13 @@ def _make_figures(
         )
         pc_limit = max(float(np.max(np.abs(pc_values))), 1.0)
         explained_percent = float(explained_variance[mode_index] * 100.0)
+        # 表層既有成果的標題格式已經是報告基準，因此「海表流」不額外加括號；
+        # 固定深度重繪則必須把速度場所代表的物理深度寫進主圖，避免不同深度使用
+        # 同一份海面高度 η 時，被誤讀成四張完全相同的表層分析。這個字串只改圖面
+        # 說明，不會改動回歸場、向量比例尺或任何 SVD 數值。
+        velocity_title_context = (
+            "" if velocity_context_zh == "海表流" else f"（{velocity_context_zh}）"
+        )
         (
             report_spatial_paths,
             report_vector_scale_transparent_paths,
@@ -1925,7 +1953,7 @@ def _make_figures(
             vector_reference=vector_reference,
             quiver_scale=quiver_scale,
             title=(
-                f"{config.focus_name_zh}：SVD 模態 {mode_number}"
+                f"{config.focus_name_zh}{velocity_title_context}：SVD 模態 {mode_number}"
                 f"（解釋變異量：{explained_percent:.2f}%）"
             ),
             colorbar_label="η 回歸幅度（m / PC 1σ）",
@@ -2100,6 +2128,7 @@ def _make_figures(
 ## 分析範圍與資料覆蓋
 
 - 區域：{config.focus_name_zh}
+- 速度層位：{velocity_context_zh}；η 始終是同時次、同水平格點的自由水面高度，不是該深度的另一個 η。
 - analysis bbox（lon_min, lon_max, lat_min, lat_max）：{list(config.bbox)}
 - 可得樣本：{retained_time_count:,} / {expected_time_count:,} 小時（{time_coverage_fraction * 100.0:.2f}%）
 - 圖面時間範圍：{_iso_utc_from_ns(int(time_utc_ns[0]))} 至 {_iso_utc_from_ns(int(time_utc_ns[-1]))}
@@ -2205,7 +2234,7 @@ def _make_figures(
         "spatial_pattern_representation": {
             "pc": "每一模態以樣本標準差 ddof=1 標準化為無因次 PC。",
             "scalar_background": "eta 回歸空間模態，單位 m per 1 standard deviation of PC。",
-            "vectors": "u/v 回歸空間模態，單位 m s-1 per 1 standard deviation of PC。",
+            "vectors": f"{velocity_context_zh} u/v 回歸空間模態，單位 m s-1 per 1 standard deviation of PC。",
             "equivalence": "regression_pattern × standardized_PC 等價於原 physical_loading × raw_PC 的單模態距平重建（忽略記錄於 metadata 的浮點 PC 均值尾差）。",
         },
         "time_series": {
@@ -2221,7 +2250,7 @@ def _make_figures(
         "academic_visual_references": [
             {
                 "doi": "10.5194/os-18-1183-2022",
-                "applied_convention": "海表流 SVD 空間向量圖與對應時間模態分開呈現，向量抽稀以維持可讀性。",
+                "applied_convention": f"{velocity_context_zh} SVD 空間向量圖與對應時間模態分開呈現，向量抽稀以維持可讀性。",
             },
             {
                 "doi": "10.5194/os-21-3361-2025",
