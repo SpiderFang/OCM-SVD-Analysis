@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0.0",
+  "analysis_kind": "fixed_depth_multivariate_svd_batch",
+  "batch_label": "six_regions_fixed_depth_u_v_eta_available_2024_2025_v1",
+  "purpose": "以分組依序執行方式建立六區 2024–2025 全部可得資料的 fixed-depth u/v/eta SVD family。此批次只發布 fixed_depth_svd 與 fixed_depth_svd_figure_bundles，絕不讀取、覆寫或重繪表層 svd 成果。同一執行組禁止同時讀取相同 native 資料區域，以控制 NFS 分散索引 I/O 與記憶體壓力。",
+  "source_analysis_units_config": "OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json",
+  "source_analysis_units_config_sha256": "4af676a1560833c19f527432ca57d4e4bf0a83cdf79a1e32aa1f471fba7f7c28",
+  "result_namespace": "fixed_depth_svd",
+  "figure_bundle_namespace": "fixed_depth_svd_figure_bundles",
+  "parallel_execution": {
+    "server_minimum_cpu_cores": 8,
+    "max_concurrent_regions": 2,
+    "per_region_linear_algebra_threads": 4,
+    "per_region_io_workers": 2,
+    "policy": "最多兩區並行且同一執行組的資料區域必須不同。龜山／貢寮共用東北臺灣 cache，北竿／南竿共用連江 cache，故各自置於不同執行組；SVD 線性代數不是主要瓶頸，優先保護 native hvel/zcor 的 NFS memory-map I/O。"
+  },
+  "region_configs": [
+    {"analysis_unit_id": "guishan_surface_svd_candidate_v3", "config": "guishan_fixed_depth_svd_available_2024_2025.json"},
+    {"analysis_unit_id": "gongliao_surface_svd_candidate_v3", "config": "gongliao_fixed_depth_svd_available_2024_2025.json"},
+    {"analysis_unit_id": "hsinchu_surface_svd_candidate_v3", "config": "hsinchu_fixed_depth_svd_available_2024_2025.json"},
+    {"analysis_unit_id": "houwan_nmmba_surface_svd_candidate_v3", "config": "houwan_nmmba_fixed_depth_svd_available_2024_2025.json"},
+    {"analysis_unit_id": "beigan_surface_svd_aoi_v1", "config": "beigan_fixed_depth_svd_available_2024_2025.json"},
+    {"analysis_unit_id": "nangan_surface_svd_aoi_v1", "config": "nangan_fixed_depth_svd_available_2024_2025.json"}
+  ],
+  "execution_groups": [
+    {"execution_group_id": "group_01_guishan_hsinchu", "analysis_unit_ids": ["guishan_surface_svd_candidate_v3", "hsinchu_surface_svd_candidate_v3"]},
+    {"execution_group_id": "group_02_gongliao_houwan", "analysis_unit_ids": ["gongliao_surface_svd_candidate_v3", "houwan_nmmba_surface_svd_candidate_v3"]},
+    {"execution_group_id": "group_03_beigan", "analysis_unit_ids": ["beigan_surface_svd_aoi_v1"]},
+    {"execution_group_id": "group_04_nangan", "analysis_unit_ids": ["nangan_surface_svd_aoi_v1"]}
+  ]
+}

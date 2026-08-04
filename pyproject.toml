@@ -20,6 +20,7 @@ dependencies = [
 ocm-svd = "ocm_svd_analysis.cli:main"
 ocm-svd-batch = "ocm_svd_analysis.batch_cli:main"
 ocm-svd-fixed-depth = "ocm_svd_analysis.fixed_depth_cli:main"
+ocm-svd-fixed-depth-batch = "ocm_svd_analysis.fixed_depth_batch_cli:main"
 ocm-svd-fixed-depth-replot = "ocm_svd_analysis.fixed_depth_replot_cli:main"
 ocm-svd-replot = "ocm_svd_analysis.replot_cli:main"
 ocm-svd-replot-batch = "ocm_svd_analysis.replot_batch_cli:main"

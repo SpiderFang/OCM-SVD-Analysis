@@ -29,9 +29,11 @@ from .surface_multivariate_svd import (
     AnalysisConfig,
     PreparedAnalysisData,
     SourceMonth,
+    TimeAxisCanonicalization,
     _academic_visualization_fields,
     _apply_known_time_axis_repairs,
     _array_descriptor,
+    _canonicalize_source_time_axis,
     _canonical_json_hash,
     _configured_year_label,
     _expand_imputed_mask,
@@ -93,7 +95,13 @@ class FixedDepthMonthChunk:
 
 @dataclass(frozen=True)
 class LoadedFixedDepthFamily:
-    """串接所有月份後、尚未套用共同分析遮罩的垂向比較 family。"""
+    """串接、校正並 canonicalize 後，尚未套用共同分析遮罩的垂向比較 family。
+
+    固定深度 family 的四層欄位必須以同一組 UTC 樣本比較；因此跨月時間軸若採
+    ``sort_and_deduplicate_prefer_last``，不只時間座標會排序與去重，`fields`、`valid`
+    與 `bracket_span_m` 也會沿 time 軸使用同一組索引同步重排。這可避免深層流速、
+    表層流速與 eta 因只修正時間標籤而彼此錯配。
+    """
 
     lon: np.ndarray
     lat: np.ndarray
@@ -112,16 +120,25 @@ class LoadedFixedDepthFamily:
     native_sources: tuple[SourceMonth, ...]
     surface_sources: tuple[SourceMonth, ...]
     repaired_time_step_count: int
+    time_axis_canonicalization: TimeAxisCanonicalization
 
 
 @dataclass(frozen=True)
 class PreparedFixedDepthFamily:
-    """具有完全一致空間與時間樣本的表層／固定深度 SVD 輸入。"""
+    """具有完全一致空間與時間樣本的表層／固定深度 SVD 輸入。
+
+    三個 ``source_*`` 欄位描述 canonicalization 後、短缺值插補前的來源 UTC 軸；即使
+    全部可得資料契約不限制最大來源缺口，仍須將實際缺口與斷點數發布到 metadata，避免
+    後續報告把不連續的可得樣本誤稱為完整雙年度序列。
+    """
 
     levels: tuple[PreparedAnalysisData, ...]
     common_mask: np.ndarray
     complete_time_mask: np.ndarray
     level_cell_valid_fraction: np.ndarray
+    source_median_timestep_hours: float
+    source_maximum_gap_hours: float
+    source_gap_break_count: int
 
 
 def _as_positive_depth(value: object, field: str) -> float:
@@ -540,7 +557,11 @@ def load_fixed_depth_family(
     allow_partial_months: bool,
     allow_trial: bool,
 ) -> LoadedFixedDepthFamily:
-    """平行讀取 paired 月份並建立表層加所有固定深度的垂向比較 family。"""
+    """平行讀取 paired 月份，建立並 canonicalize 垂向比較 family。
+
+    每個月仍依設定年份、月序輸入，讓 stable sort 的「同 UTC 後出現樣本優先」規則可
+    重現。嚴格設定使用 ``reject`` 時則維持原本行為：只要跨月 UTC 倒序或重複就停止。
+    """
 
     (
         lon,
@@ -604,11 +625,21 @@ def load_fixed_depth_family(
         }
         chunks = [futures[pair].result() for pair in pairs]
 
-    time = np.concatenate([chunk.time_utc_ns for chunk in chunks], axis=0)
-    _require(
-        np.all(np.diff(time) > 0),
-        "固定深度跨月 time_utc_ns 必須嚴格遞增且不可有重複邊界",
+    source_time = np.concatenate([chunk.time_utc_ns for chunk in chunks], axis=0)
+    fields = np.concatenate([chunk.fields for chunk in chunks], axis=1)
+    valid = np.concatenate([chunk.valid for chunk in chunks], axis=1)
+    bracket_span_m = np.concatenate(
+        [chunk.bracket_span_m for chunk in chunks],
+        axis=1,
     )
+    # 只允許設定明確授權時處理跨月倒序／重複 UTC。retained indices 同步套用至四層
+    # u/v/eta、每層有效遮罩與三個固定深度的 zcor 包夾距離，防止輸入樣本錯配。
+    time, retained_time_indices, time_axis_canonicalization = (
+        _canonicalize_source_time_axis(source_time, config.base)
+    )
+    fields = fields[:, retained_time_indices]
+    valid = valid[:, retained_time_indices]
+    bracket_span_m = bracket_span_m[:, retained_time_indices]
     level_ids = ("surface_reference",) + tuple(
         f"z_minus_{depth_m:06.2f}m".replace(".", "p")
         for depth_m in config.depths_m
@@ -626,12 +657,9 @@ def load_fixed_depth_family(
         level_ids=level_ids,
         level_contexts_zh=level_contexts,
         depths_m=config.depths_m,
-        fields=np.concatenate([chunk.fields for chunk in chunks], axis=1),
-        valid=np.concatenate([chunk.valid for chunk in chunks], axis=1),
-        bracket_span_m=np.concatenate(
-            [chunk.bracket_span_m for chunk in chunks],
-            axis=1,
-        ),
+        fields=fields,
+        valid=valid,
+        bracket_span_m=bracket_span_m,
         time_utc_ns=time,
         lat_slice=lat_slice,
         lon_slice=lon_slice,
@@ -640,6 +668,7 @@ def load_fixed_depth_family(
         repaired_time_step_count=sum(
             chunk.repaired_time_step_count for chunk in chunks
         ),
+        time_axis_canonicalization=time_axis_canonicalization,
     )
 
 
@@ -655,7 +684,11 @@ def prepare_fixed_depth_family(
     不同，而不是垂向流場差異。
     """
 
-    _validate_source_time_axis(loaded.time_utc_ns, config.base)
+    (
+        source_median_timestep_hours,
+        source_maximum_gap_hours,
+        source_gap_break_count,
+    ) = _validate_source_time_axis(loaded.time_utc_ns, config.base)
     _require(
         loaded.fields.ndim == 5
         and loaded.fields.shape[:2] == loaded.valid.shape[:2]
@@ -726,6 +759,12 @@ def prepare_fixed_depth_family(
             retained_time_fraction=retained_fraction,
             initial_time_count=int(loaded.time_utc_ns.size),
             common_ocean_cell_count=common_count,
+            # PreparedAnalysisData 是表層與固定深度共用的資料契約；固定深度每個
+            # level 使用同一 canonicalized 來源時間軸，故三項來源節奏統計必須逐層
+            # 填入，不能遺漏而讓後續 SVD solver 或 metadata 看到不完整物件。
+            source_median_timestep_hours=source_median_timestep_hours,
+            source_maximum_gap_hours=source_maximum_gap_hours,
+            source_gap_break_count=source_gap_break_count,
         )
         for level_index, interpolated in enumerate(interpolated_levels)
     )
@@ -734,6 +773,9 @@ def prepare_fixed_depth_family(
         common_mask=common_mask,
         complete_time_mask=complete_time,
         level_cell_valid_fraction=level_fraction,
+        source_median_timestep_hours=source_median_timestep_hours,
+        source_maximum_gap_hours=source_maximum_gap_hours,
+        source_gap_break_count=source_gap_break_count,
     )
 
 
@@ -916,6 +958,15 @@ def run_fixed_depth_multivariate_svd(
         for source in loaded.native_sources + loaded.surface_sources
     ):
         family_status = "trial_pilot"
+    # AOI 核定狀態屬於每一份固定深度 family 的科學限制，不能沿用舊貢寮 pilot 的
+    # 固定文字；否則北竿／南竿核定區或其他候選區的 metadata 會被錯誤標示，影響成果
+    # 報告可追溯性。candidate 仍明確禁止外推為正式 AOI 結論。
+    focus_limitation = (
+        f"focus approval_status=candidate；{config.base.focus_name_zh}成果為候選區 pilot，"
+        "不取代研究團隊核定 AOI。"
+        if config.base.approval_status == "candidate"
+        else f"focus approval_status=approved；{config.base.focus_name_zh}採用上游已核定分析區邊界，但仍須揭露資料可得性與固定深度垂向限制。"
+    )
     with performance.measure("all_level_svd_solver_and_field_derivation"):
         level_products: list[dict[str, Any]] = []
         for level_index, prepared in enumerate(prepared_family.levels):
@@ -1201,6 +1252,54 @@ def run_fixed_depth_multivariate_svd(
                 "repaired_time_step_count": (
                     loaded.repaired_time_step_count
                 ),
+                # 固定深度與表層 SVD 都必須公開 UTC 排序／去重的影響；但此欄位特別
+                # 記錄 paired native/surface 四層資料使用同一索引同步處理，不能與表層
+                # run 的 input_surface metadata 混為同一份產品。
+                "paired_input_time_axis": {
+                    "time_axis_canonicalization": {
+                        "policy": loaded.time_axis_canonicalization.policy,
+                        "input_time_count": (
+                            loaded.time_axis_canonicalization.input_time_count
+                        ),
+                        "output_time_count": (
+                            loaded.time_axis_canonicalization.output_time_count
+                        ),
+                        "reordered_time_step_count": (
+                            loaded.time_axis_canonicalization.reordered_time_step_count
+                        ),
+                        "dropped_duplicate_time_step_count": (
+                            loaded.time_axis_canonicalization.dropped_duplicate_time_step_count
+                        ),
+                        "semantics": (
+                            "sort_and_deduplicate_prefer_last 先以 UTC 穩定排序，再保留"
+                            "每個重複 UTC 在設定年份、月份與月內索引序列中最後出現的"
+                            "paired native/surface 樣本；同一索引同步套用至所有 depth "
+                            "level 的 u/v/eta、valid 與 bracket span，不補值、不改數值。"
+                        ),
+                    },
+                    "source_time_axis": {
+                        "expected_timestep_hours": (
+                            config.base.expected_timestep_hours
+                        ),
+                        "median_timestep_hours": (
+                            prepared_family.source_median_timestep_hours
+                        ),
+                        "maximum_gap_hours": (
+                            prepared_family.source_maximum_gap_hours
+                        ),
+                        "maximum_gap_limit_hours": (
+                            config.base.maximum_source_gap_hours
+                        ),
+                        "maximum_gap_policy": (
+                            "unbounded_but_reported"
+                            if config.base.maximum_source_gap_hours is None
+                            else "bounded_and_validated"
+                        ),
+                        "gap_break_count": (
+                            prepared_family.source_gap_break_count
+                        ),
+                    },
+                },
                 "levels": level_summaries,
                 "performance": performance.to_metadata(
                     scope_end=(
@@ -1209,7 +1308,7 @@ def run_fixed_depth_multivariate_svd(
                     )
                 ),
                 "limitations": [
-                    "focus approval_status=candidate；成果是貢寮候選框 pilot，不取代研究團隊核定 AOI。",
+                    focus_limitation,
                     "固定 z 的正式垂向 datum 仍須以 OCM 供應者資料契約確認；確認前深度標示屬可重現 pilot 定義。",
                     "近底/HAB 與完整三維 SVD 不在本 family 範圍。",
                 ],

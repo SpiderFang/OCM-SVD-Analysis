@@ -14,9 +14,17 @@ from ocm_svd_analysis.fixed_depth_multivariate_svd import (
     interpolate_velocity_to_fixed_z,
     run_fixed_depth_multivariate_svd,
 )
+from ocm_svd_analysis.fixed_depth_batch import (
+    load_fixed_depth_batch_config,
+    run_fixed_depth_multivariate_svd_batch,
+)
 from ocm_svd_analysis.fixed_depth_replot import (
     replot_fixed_depth_multivariate_svd,
 )
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+"""repository 根目錄，供正式六區固定深度設定載入測試使用。"""
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -363,6 +371,226 @@ class FixedDepthMultivariateSvdTest(unittest.TestCase):
                         )
                     )
                 )
+
+    def test_available_samples_canonicalize_paired_fixed_depth_family_with_last_sample_precedence(self) -> None:
+        """雙年度 available 契約須同步 canonicalize 四層 paired 資料。
+
+        第二個合成月份刻意使用與第一月完全相同的 48 個 UTC，但將 eta 整體加上 10 m。
+        stable sort 的後出現樣本優先規則必須只保留第二月資料；若固定深度程式只重排時間軸
+        或遺漏任一 level 的陣列，表層參考平均 eta、共同時次數與 metadata 都會失去一致。
+        """
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            coastline_path = root / "land.geojson"
+            _write_json(coastline_path, {"type": "FeatureCollection", "features": []})
+            config_path = _make_fixed_depth_config(
+                root,
+                hashlib.sha256(coastline_path.read_bytes()).hexdigest(),
+            )
+            surface_root, native_root, eta_first_month = _make_paired_cache(root)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["analysis_label"] = "synthetic_fixed_depth_available_canonicalized_v1"
+            config["input"] = {
+                "years": [2025],
+                "months": [1, 2],
+                "required_cache_schema_major": 3,
+                "required_status": "ready",
+                "required_cache_kinds": ["standard_month"],
+                "expected_timestep_hours": 1.0,
+                "maximum_source_gap_hours": None,
+                "time_axis_canonicalization_policy": "sort_and_deduplicate_prefer_last",
+            }
+            _write_json(config_path, config)
+
+            domain = "synthetic_domain"
+            first_surface = surface_root / domain / "months" / "202501"
+            first_native = native_root / domain / "months" / "202501"
+            second_surface = surface_root / domain / "months" / "202502"
+            second_native = native_root / domain / "months" / "202502"
+            second_surface.mkdir(parents=True)
+            second_native.mkdir(parents=True)
+            # 只變更 eta 數值作為可觀測 marker；UTC、native hvel/zcor 與其餘 surface
+            # 欄位維持合法 paired shape，讓測試專注驗證跨月同 UTC 的同步去重規則。
+            for filename in (
+                "time_utc_ns.npy",
+                "u_surface_mps.npy",
+                "v_surface_mps.npy",
+                "eta_m.npy",
+                "valid_mask_surface.npy",
+            ):
+                values = np.load(first_surface / filename, allow_pickle=False)
+                if filename == "eta_m.npy":
+                    values = values + np.float32(10.0)
+                np.save(second_surface / filename, values, allow_pickle=False)
+            for filename in ("time_utc_ns.npy", "hvel.npy", "zcor.npy"):
+                np.save(
+                    second_native / filename,
+                    np.load(first_native / filename, allow_pickle=False),
+                    allow_pickle=False,
+                )
+            for month_dir in (second_surface, second_native):
+                metadata = json.loads(
+                    (first_surface if month_dir == second_surface else first_native)
+                    .joinpath("metadata.json")
+                    .read_text(encoding="utf-8")
+                )
+                metadata["month"] = "202502"
+                _write_json(month_dir / "metadata.json", metadata)
+
+            result = run_fixed_depth_multivariate_svd(
+                config_path=config_path,
+                native_root=native_root,
+                surface_root=surface_root,
+                output_root=root / "derived",
+            )
+            metadata = json.loads((result / "metadata.json").read_text(encoding="utf-8"))
+            canonicalization = metadata["paired_input_time_axis"]["time_axis_canonicalization"]
+            self.assertEqual(canonicalization["policy"], "sort_and_deduplicate_prefer_last")
+            self.assertEqual(canonicalization["input_time_count"], 96)
+            self.assertEqual(canonicalization["output_time_count"], 48)
+            self.assertEqual(canonicalization["dropped_duplicate_time_step_count"], 48)
+            self.assertGreater(canonicalization["reordered_time_step_count"], 0)
+            self.assertEqual(metadata["shared_sample_contract"]["retained_time_count"], 48)
+            np.testing.assert_array_equal(
+                np.load(result / "time_utc_ns.npy", allow_pickle=False),
+                np.load(first_surface / "time_utc_ns.npy", allow_pickle=False),
+            )
+            shared_mask = np.load(result / "shared_valid_mask.npy", allow_pickle=False)
+            expected_mean_eta = np.full((3, 3), np.nan, dtype=np.float64)
+            expected_mean_eta[shared_mask] = np.mean(
+                (eta_first_month + np.float32(10.0))[:, 1:4, 1:4][:, shared_mask],
+                axis=0,
+                dtype=np.float64,
+            )
+            surface_mean_eta = np.load(
+                result / "levels" / "surface_reference" / "mean_eta.npy",
+                allow_pickle=False,
+            )
+            np.testing.assert_allclose(
+                surface_mean_eta,
+                expected_mean_eta,
+                rtol=0.0,
+                atol=1e-7,
+                equal_nan=True,
+            )
+
+    def test_six_region_fixed_depth_batch_config_uses_isolated_namespaces_and_domains(self) -> None:
+        """正式六區 batch 必須隔離 fixed-depth 命名空間並序列化共用 native domain。
+
+        此測試不讀 SERVER cache；它只載入版本化 JSON，確認六區設定皆為固定深度 family、
+        輸出父目錄不是表層 svd，且每個執行組沒有重複的資料區域。若日後有人把表層
+        config、表層圖包或北竿／南竿同時讀取排程混入，本測試會在 code review 階段失敗。
+        """
+
+        batch = load_fixed_depth_batch_config(
+            PROJECT_ROOT
+            / "configs"
+            / "six_regions_fixed_depth_svd_available_2024_2025_batch.json"
+        )
+        self.assertEqual(batch.result_namespace, "fixed_depth_svd")
+        self.assertEqual(
+            batch.figure_bundle_namespace,
+            "fixed_depth_svd_figure_bundles",
+        )
+        self.assertEqual(
+            sum(len(group.regions) for group in batch.execution_groups),
+            6,
+        )
+        self.assertEqual(len(batch.execution_groups), 4)
+        for group in batch.execution_groups:
+            domains = [region.config.base.domain_id for region in group.regions]
+            self.assertEqual(len(domains), len(set(domains)))
+            for region in group.regions:
+                self.assertEqual(
+                    region.config.base.raw["analysis_kind"],
+                    "fixed_depth_multivariate_svd",
+                )
+                self.assertIn("fixed_depth", region.config_path.name)
+
+    def test_fixed_depth_batch_publishes_only_fixed_depth_namespace_and_can_resume(self) -> None:
+        """固定深度 batch 應發布獨立 family，恢復時只跳過既有 fixed-depth run。
+
+        此合成 smoke test 使用一個區域驗證 batch process 的端到端路徑，而不是只測 JSON
+        loader：第一次必須建立 ``fixed_depth_svd/``，第二次加 ``skip_existing`` 必須回報
+        already_exists。測試也明確斷言同一 output root 下沒有 ``svd/``，防止未來重構把
+        固定深度 CLI 錯接到完整表層產品命名空間。
+        """
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            coastline_path = root / "land.geojson"
+            _write_json(coastline_path, {"type": "FeatureCollection", "features": []})
+            config_path = _make_fixed_depth_config(
+                root,
+                hashlib.sha256(coastline_path.read_bytes()).hexdigest(),
+            )
+            surface_root, native_root, _eta = _make_paired_cache(root)
+            batch_path = root / "fixed_depth_batch.json"
+            _write_json(
+                batch_path,
+                {
+                    "schema_version": "1.0.0",
+                    "analysis_kind": "fixed_depth_multivariate_svd_batch",
+                    "batch_label": "synthetic_fixed_depth_batch_v1",
+                    "source_analysis_units_config": "synthetic.json",
+                    "source_analysis_units_config_sha256": "a" * 64,
+                    "result_namespace": "fixed_depth_svd",
+                    "figure_bundle_namespace": "fixed_depth_svd_figure_bundles",
+                    "parallel_execution": {
+                        "server_minimum_cpu_cores": 2,
+                        "max_concurrent_regions": 1,
+                        "per_region_linear_algebra_threads": 2,
+                        "per_region_io_workers": 1,
+                    },
+                    "region_configs": [
+                        {
+                            "analysis_unit_id": "synthetic_fixed_z_v1",
+                            "config": "fixed_depth_config.json",
+                        }
+                    ],
+                    "execution_groups": [
+                        {
+                            "execution_group_id": "group_01_synthetic",
+                            "analysis_unit_ids": ["synthetic_fixed_z_v1"],
+                        }
+                    ],
+                },
+            )
+            output_root = root / "derived"
+            first = run_fixed_depth_multivariate_svd_batch(
+                batch_config_path=batch_path,
+                native_root=native_root,
+                surface_root=surface_root,
+                output_root=output_root,
+            )
+            self.assertEqual(first.result_namespace, "fixed_depth_svd")
+            self.assertEqual(first.regions[0].status, "created")
+            self.assertTrue(
+                (output_root / "fixed_depth_svd" / "synthetic_fixed_depth_family_v1").is_dir()
+            )
+            self.assertFalse((output_root / "svd").exists())
+            family_metadata = json.loads(
+                (
+                    output_root
+                    / "fixed_depth_svd"
+                    / "synthetic_fixed_depth_family_v1"
+                    / "metadata.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertTrue(
+                family_metadata["limitations"][0].startswith(
+                    "focus approval_status=approved"
+                )
+            )
+            resumed = run_fixed_depth_multivariate_svd_batch(
+                batch_config_path=batch_path,
+                native_root=native_root,
+                surface_root=surface_root,
+                output_root=output_root,
+                skip_existing=True,
+            )
+            self.assertEqual(resumed.regions[0].status, "already_exists")
 
     def test_replot_adds_latest_scale_assets_and_shared_coverage_qc(self) -> None:
         """重繪應補齊內嵌／透明比例尺與四層 QC 圖，且不得修改來源 family。

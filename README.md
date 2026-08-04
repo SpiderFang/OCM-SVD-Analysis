@@ -304,6 +304,64 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd-fixed-depth-replot \
 排除 66 格。這 66 格在科學空間圖中維持缺值，不補值、不外插；QC 圖以橙色說明其排除
 來源，不能解讀成陸地。本機只讀既有陣列重繪共耗時約 19.53 秒。
 
+### 六區 2024–2025 固定深度 SVD：獨立 family 與分組依序執行
+
+六區雙年度固定深度成果使用
+[`configs/six_regions_fixed_depth_svd_available_2024_2025_batch.json`](./configs/six_regions_fixed_depth_svd_available_2024_2025_batch.json)，
+這不是表層 [`six_regions_surface_svd_available_2024_2025_batch.json`](./configs/six_regions_surface_svd_available_2024_2025_batch.json)
+的替代版本，也不能彼此交叉使用。固定深度 batch 僅接受六份
+`*_fixed_depth_svd_available_2024_2025.json`，且強制鎖定以下兩個獨立命名空間：
+
+```text
+$SVD_OUTPUT_ROOT/fixed_depth_svd/<analysis_label_vN>/
+$SVD_OUTPUT_ROOT/fixed_depth_svd_figure_bundles/<analysis_label_vN>/academic_report_ready_v8/
+```
+
+它絕不建立、讀取、覆寫或重繪 `$SVD_OUTPUT_ROOT/svd/` 與
+`$SVD_OUTPUT_ROOT/svd_figure_bundles/` 的完整表層產品。每一 family 仍包含共同遮罩表層
+參考、`z=-5/-10/-20 m` 的 `u/v`、同時次唯一 `eta`、逐時 `vertical_bracket_span_m` 與
+四層共同時間交集；圖面只能在科學 family 發布後由 fixed-depth replot 建立。
+
+六區使用「2024–2025 全部可得 paired native/surface 樣本」契約：可由 CLI 明確接受
+`standard_partial_month`，不跨來源斷點補值，並把實際缺口保留於 metadata。跨月 UTC 倒序或
+重複時，僅在設定明確指定 `sort_and_deduplicate_prefer_last` 時，以同一組索引同步排序／
+去重所有深度的 `u/v/eta`、valid mask 和 bracket span；固定深度 metadata 的
+`paired_input_time_axis` 會完整記錄影響。龜山與貢寮維持 2025-07 已知時間座標修正，但不
+修改任何 native/surface 數值。
+
+正式 SERVER 必須先執行 paired 預檢；它只讀 metadata、time 軸、grid 對應與陣列 header，
+不建立成果目錄：
+
+```bash
+export OCM_NATIVE_ROOT=/home/mustlab/data/OCM-Preprocessed-Data/preprocessed/ocm_native
+export OCM_SURFACE_ROOT=/home/mustlab/data/OCM-Preprocessed-Data/preprocessed/ocm_surface
+export SVD_OUTPUT_ROOT=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-08-04
+
+./scripts/preflight_fixed_depth_svd_available_2024_2025.sh
+```
+
+預檢六區均為 `OK` 後，以固定深度專用 batch 執行：
+
+```bash
+./scripts/run_fixed_depth_svd_batch_available_2024_2025.sh
+```
+
+批次分成四個「執行組」並依序處理：第一組為龜山＋新竹，第二組為貢寮＋後灣／海生館，
+第三組為北竿，第四組為南竿。同一執行組禁止使用相同資料區域，因此龜山／貢寮與北竿／
+南竿不會同時對同一 native cache 做分散節點讀取；同時最多兩區、每區兩個 I/O worker 與
+四個 BLAS threads。若作業中斷，先檢查已發布 family，再以 `FIXED_DEPTH_SKIP_EXISTING=1`
+重跑同一入口；此旗標只跳過已原子發布的
+`fixed_depth_svd/` run，絕不覆寫或引用表層成果。
+
+全部科學 family 通過驗收後，才建立圖包：
+
+```bash
+./scripts/replot_six_regions_fixed_depth_available_2024_2025.sh
+```
+
+詳細的輸入契約、分組理由、成果結構、驗收門檻與研究限制見
+[`docs/six_regions_2024_2025_fixed_depth_svd_method.md`](./docs/six_regions_2024_2025_fixed_depth_svd_method.md)。
+
 ## 平行化執行
 
 單區設定已啟用兩段不重疊的平行化：
