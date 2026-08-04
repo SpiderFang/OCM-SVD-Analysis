@@ -43,6 +43,93 @@ SURFACE_CACHE_SCHEMA_MAJOR = 3
 COMPONENT_NAMES = ("u", "v", "eta")
 """三變數 SVD 狀態向量的固定分量順序，亦是輸出 imputation mask 的 component 軸順序。"""
 
+ACADEMIC_REPORT_READY_V6 = "academic_report_ready_v6"
+"""既有正式圖面版本；保留以重現已發布圖包的版面與 provenance。"""
+
+ACADEMIC_REPORT_READY_V7 = "academic_report_ready_v7"
+"""已發布的正式圖面版本；跨年度 PC 採季刻度以改善可讀性。"""
+
+ACADEMIC_REPORT_READY_V8 = "academic_report_ready_v8"
+"""正式圖面版本；保留逐月 PC，將完整年月標籤依指定方向垂直排列。"""
+
+
+@dataclass(frozen=True)
+class AcademicReportLayout:
+    """正式圖包的刻度密度與文字尺寸契約。
+
+    圖面版型會影響閱讀與圖檔版本身分，卻不能改變 SVD 陣列、時間樣本或地理範圍。此物件
+    將 PC 月份刻度、空間圖座標刻度數與字級集中管理，使同一 `figures.style` 在六區產出
+    一致版面，並可寫入 `plot_metadata.json` 供報告審查追溯。
+    """
+
+    pc_major_tick_months: tuple[int, ...]
+    pc_date_format: str
+    pc_tick_label_size: float
+    pc_tick_rotation_degrees: float
+    pc_figure_height_inches: float
+    map_axis_tick_count: int
+    map_tick_label_size: float
+    colorbar_tick_label_size: float
+
+
+def _academic_report_layout(figure_style: str, years: tuple[int, ...]) -> AcademicReportLayout:
+    """回傳指定圖面版本與時間窗適用的固定刻度版型。
+
+    v8 對跨兩年以上的 PC 保留 24 個逐月 `YYYY-MM` 標籤，並依使用者指定方向旋轉為
+    270° 的直式橫寫、降低字級與增加圖高，避免標籤互相覆蓋卻不隱藏任何月份。v7 的
+    季刻度與 v6 的舊版型均保留，以重現已發布圖包。空間圖的 v7/v8 都由六個經緯度
+    刻度縮為五個並略降字級，保留兩端實際邊界且給色條與座標標籤足夠留白。此函式只
+    決定顯示，絕不篩選、重排或變更時間軸資料。
+    """
+
+    if figure_style == ACADEMIC_REPORT_READY_V8:
+        return AcademicReportLayout(
+            pc_major_tick_months=tuple(range(1, 13)),
+            pc_date_format="%m" if len(years) == 1 else "%Y-%m",
+            pc_tick_label_size=8.5,
+            # 270° 讓 `YYYY-MM` 從上往下讀，與研究團隊指定的「直式橫寫」範例相同；
+            # 對於長達兩年的月份軸，這比省略月份或使用季刻度更能保留資料覆蓋語意。
+            pc_tick_rotation_degrees=270.0,
+            pc_figure_height_inches=4.45 if len(years) >= 2 else 4.0,
+            map_axis_tick_count=5,
+            map_tick_label_size=9.0,
+            colorbar_tick_label_size=8.5,
+        )
+
+    if figure_style == ACADEMIC_REPORT_READY_V7:
+        if len(years) >= 2:
+            return AcademicReportLayout(
+                pc_major_tick_months=(1, 4, 7, 10),
+                pc_date_format="%Y-%m",
+                pc_tick_label_size=9.0,
+                pc_tick_rotation_degrees=0.0,
+                pc_figure_height_inches=4.0,
+                map_axis_tick_count=5,
+                map_tick_label_size=9.0,
+                colorbar_tick_label_size=8.5,
+            )
+        return AcademicReportLayout(
+            pc_major_tick_months=tuple(range(1, 13)),
+            pc_date_format="%m",
+            pc_tick_label_size=9.0,
+            pc_tick_rotation_degrees=0.0,
+            pc_figure_height_inches=4.0,
+            map_axis_tick_count=5,
+            map_tick_label_size=9.0,
+            colorbar_tick_label_size=8.5,
+        )
+
+    return AcademicReportLayout(
+        pc_major_tick_months=tuple(range(1, 13)),
+        pc_date_format="%m" if len(years) == 1 else "%Y-%m",
+        pc_tick_label_size=10.0,
+        pc_tick_rotation_degrees=0.0,
+        pc_figure_height_inches=4.0,
+        map_axis_tick_count=6,
+        map_tick_label_size=10.0,
+        colorbar_tick_label_size=9.0,
+    )
+
 
 @dataclass(frozen=True)
 class TimeAxisRepair:
@@ -587,12 +674,13 @@ def load_analysis_config(
         raise ValueError("figures 必須是物件")
     # 正式流程只允許輸出白底、完整標示的報告圖。舊版無文字透明素材已由專案移除，
     # 因為圖檔一旦脫離 sidecar 就無法判斷變數、單位、模態或研究範圍，容易被誤用。
-    # v5 另加入版本化高解析岸線並移除容易被誤認為測站的 anchor 記號。style 只影響
-    # figure bundle，不進入重繪器的科學設定雜湊，因此切換不會重新求解 SVD。
-    figure_style = figure_config.get("style", "academic_report_ready_v6")
+    # v5 另加入版本化高解析岸線並移除容易被誤認為測站的 anchor 記號；v7/v8 再針對
+    # 跨年度 PC 與地理座標軸的標籤密度建立可讀版型。style 只影響 figure bundle，不進入
+    # 重繪器的科學設定雜湊，因此切換不會重新求解 SVD。
+    figure_style = figure_config.get("style", ACADEMIC_REPORT_READY_V6)
     _require(
-        figure_style == "academic_report_ready_v6",
-        "figures.style 只允許 academic_report_ready_v6，以確保獨立向量比例尺、明確邊界與版本化岸線",
+        figure_style in {ACADEMIC_REPORT_READY_V6, ACADEMIC_REPORT_READY_V7, ACADEMIC_REPORT_READY_V8},
+        "figures.style 只允許 academic_report_ready_v6、academic_report_ready_v7 或 academic_report_ready_v8，以確保獨立向量比例尺、明確邊界、可讀刻度與版本化岸線",
     )
     figure_formats_raw = figure_config.get("output_formats", ["png"])
     if not isinstance(figure_formats_raw, list) or not figure_formats_raw:
@@ -1550,7 +1638,8 @@ def _make_figures(
 
     圖面遵循海洋流場 SVD 文獻常見結構：空間模態以 eta 物理回歸幅度作底色、u/v 回歸
     向量疊圖，並為每個模態另輸出標準化 PC 時序；解釋變異另外輸出 scree/cumulative
-    圖。正式 `academic_report_ready_v6` 只在 `figures/report/` 產生白底、完整中文
+    圖。正式 `academic_report_ready_v6`、`academic_report_ready_v7` 與
+    `academic_report_ready_v8` 都只在 `figures/report/` 產生白底、完整中文
     解釋變異量、明確經緯度與色階上下限、圖例及版本化高解析海岸線；每張空間圖的
     向量參考尺另存成同 stem 的 `_vector_scale_transparent` 全透明後製素材；另輸出
     `_with_vector_scale` 完整備用圖，把參考尺直接畫在主圖右下角。不提供白底獨立
@@ -1598,6 +1687,11 @@ def _make_figures(
     lon_span = plot_lon_max - plot_lon_min
     lat_span = plot_lat_max - plot_lat_min
     geographic_aspect = 1.0 / math.cos(math.radians((lat_min + lat_max) / 2.0))
+    # 正式圖的刻度密度由已版本化的 layout 集中控制。這是在產圖前一次決定的純顯示參數，
+    # 所有平均場與模態圖共用，不能隨個別流場數值變動而造成六區報告版面不一致。
+    report_layout = _academic_report_layout(config.figure_style, config.years)
+    longitude_ticks = np.linspace(plot_lon_min, plot_lon_max, report_layout.map_axis_tick_count)
+    latitude_ticks = np.linspace(plot_lat_min, plot_lat_max, report_layout.map_axis_tick_count)
     asset_metadata: dict[str, Any] = {"modes": []}
     plot_extent = (plot_lon_min, plot_lon_max, plot_lat_min, plot_lat_max)
     source_land_polygons = _load_geojson_land_polygons(config.figure_land_overlay_path)
@@ -1905,13 +1999,11 @@ def _make_figures(
         # 以含頭含尾的等距刻度明確顯示圖面實際經緯度上下限；相較自動 locator，
         # 不會因不同 bbox 或 Matplotlib 版本而省略邊界值。三位小數可辨識 OCM 1 km
         # focus bbox 的邊界，同時避免標籤因過多有效位數互相重疊。
-        longitude_ticks = np.linspace(plot_lon_min, plot_lon_max, 6)
-        latitude_ticks = np.linspace(plot_lat_min, plot_lat_max, 6)
         axis.set_xticks(longitude_ticks)
         axis.set_yticks(latitude_ticks)
         axis.xaxis.set_major_formatter(FormatStrFormatter("%.03f"))
         axis.yaxis.set_major_formatter(FormatStrFormatter("%.03f"))
-        axis.tick_params(labelsize=10)
+        axis.tick_params(labelsize=report_layout.map_tick_label_size)
         axis.grid(color="white", linewidth=0.45, alpha=0.35)
         colorbar = fig.colorbar(scalar, ax=axis, pad=0.025, fraction=0.047)
         # 色條固定列出包含 vmin、vmax 的五個刻度，確保讀者不必由色塊或自動刻度推測
@@ -1921,7 +2013,7 @@ def _make_figures(
         colorbar.ax.yaxis.set_major_formatter(FormatStrFormatter("%.3g"))
         colorbar.update_ticks()
         colorbar.set_label(colorbar_label, fontsize=11)
-        colorbar.ax.tick_params(labelsize=9)
+        colorbar.ax.tick_params(labelsize=report_layout.colorbar_tick_label_size)
         fig.tight_layout()
         map_paths = save_report_figure(fig, stem)
 
@@ -2009,7 +2101,6 @@ def _make_figures(
         + np.timedelta64(1, "M")
         - np.timedelta64(1, "ns")
     )
-    report_time_formatter = "%m" if len(config.years) == 1 else "%Y-%m"
     diffs_hours = np.diff(time_utc_ns).astype(np.float64) / 3_600_000_000_000.0
     gap_after_indices = np.where(diffs_hours > config.expected_timestep_hours * 1.5)[0]
     segment_starts = np.concatenate((np.array([0], dtype=int), gap_after_indices + 1))
@@ -2079,7 +2170,9 @@ def _make_figures(
 
         # 報告用 PC 圖保留逐時與逐日兩個時間尺度，並讓缺測斷點維持空白。月份刻度
         # 固定由 UTC time axis 產生，避免本機時區將月底樣本移到相鄰月份。
-        fig, axis = plt.subplots(figsize=(11.2, 4.0))
+        # v8 的完整年月標籤需保留額外下方高度；這是畫布幾何調整，不會改變逐時值、
+        # 日平均、時間範圍或 y 軸尺度。單一年與舊版仍採原 4.0-inch 高度。
+        fig, axis = plt.subplots(figsize=(11.2, report_layout.pc_figure_height_inches))
         fig.patch.set_facecolor("white")
         axis.set_facecolor("white")
         axis.axhline(0.0, color="#666666", linewidth=0.75, alpha=0.9)
@@ -2110,8 +2203,17 @@ def _make_figures(
         )
         axis.set_xlabel(f"{_configured_year_label(config)} 年月份（UTC）", fontsize=11)
         axis.set_ylabel("標準化 PC（σ）", fontsize=11)
-        axis.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
-        axis.xaxis.set_major_formatter(mdates.DateFormatter(report_time_formatter))
+        # MonthLocator 的月份由版本化 layout 顯式決定。v8 仍列出每一個月，只將完整
+        # `YYYY-MM` 以指定方向直式橫寫；因此不會像季刻度一樣隱藏月份，也不抽稀逐時
+        # PC、日平均或缺測斷線。v7 則保留其已發布的 1/4/7/10 月刻度以供重現。
+        axis.xaxis.set_major_locator(mdates.MonthLocator(bymonth=report_layout.pc_major_tick_months))
+        axis.xaxis.set_major_formatter(mdates.DateFormatter(report_layout.pc_date_format))
+        axis.tick_params(axis="x", labelsize=report_layout.pc_tick_label_size, pad=4)
+        axis.tick_params(axis="y", labelsize=10)
+        for tick_label in axis.get_xticklabels():
+            tick_label.set_rotation(report_layout.pc_tick_rotation_degrees)
+            tick_label.set_horizontalalignment("center")
+            tick_label.set_verticalalignment("top")
         axis.grid(axis="y", color="#D9D9D9", linewidth=0.6, alpha=0.8)
         # 使用舊版與新版 Matplotlib 都支援的 `ncol`；SERVER 的既有科學環境
         # 尚未接受較新的 `ncols` 別名。這只控制三個圖例項目橫向排列，不改變
@@ -2203,6 +2305,9 @@ def _make_figures(
     axis.set_xlim(0.35, float(mode_numbers[-1]) + 0.65)
     axis.set_ylim(0.0, 105.0)
     axis.set_xticks(mode_numbers)
+    # 模態編號即使預設輸出 20 個也保持小字級，避免將來提高報告模態數時最右側編號互擠；
+    # 長條高度、累積線與實際解釋變異量不受這個純排版設定影響。
+    axis.tick_params(axis="both", labelsize=9)
     axis.grid(axis="y", color="#D9D9D9", linewidth=0.65, alpha=0.9, zorder=1)
     axis.legend(loc="center right", frameon=True, facecolor="white", framealpha=0.92)
     fig.tight_layout()
@@ -2299,9 +2404,15 @@ def _make_figures(
 
     plot_metadata = {
         "schema_name": "ocm_svd_academic_report_ready_figure_assets",
-        # 6.3.0 依相鄰 OCM 專案把內嵌 quiverkey 移至右下角並縮成緊湊矩形；透明
-        # 素材改依 artist bbox 對稱裁切，且箭頭沿用主圖 q95 的實際顯示長度。
-        "schema_version": "6.3.0",
+        # 8.0.0 恢復跨年度逐月 PC，並指定完整年月的直式橫寫方向；這些版面策略會完整
+        # 寫入 sidecar，避免以相同 style 名稱混用不同可讀性規格。
+        "schema_version": (
+            "8.0.0"
+            if config.figure_style == ACADEMIC_REPORT_READY_V8
+            else "7.0.0"
+            if config.figure_style == ACADEMIC_REPORT_READY_V7
+            else "6.3.0"
+        ),
         "style": config.figure_style,
         "text_policy": {
             "assets_contain_text": True,
@@ -2315,8 +2426,11 @@ def _make_figures(
             "report_font_file_sha256": report_font_sha256,
             "analysis_bbox_lon_lat": list(config.bbox),
             "plotted_valid_cell_edge_bbox_lon_lat": [plot_lon_min, plot_lon_max, plot_lat_min, plot_lat_max],
-            "longitude_axis_ticks_degrees_east": np.linspace(plot_lon_min, plot_lon_max, 6).tolist(),
-            "latitude_axis_ticks_degrees_north": np.linspace(plot_lat_min, plot_lat_max, 6).tolist(),
+            "longitude_axis_ticks_degrees_east": longitude_ticks.tolist(),
+            "latitude_axis_ticks_degrees_north": latitude_ticks.tolist(),
+            "map_axis_tick_count": report_layout.map_axis_tick_count,
+            "map_tick_label_font_size": report_layout.map_tick_label_size,
+            "colorbar_tick_label_font_size": report_layout.colorbar_tick_label_size,
             "axis_boundary_policy": "first and last visible ticks equal the plotted valid-cell-edge bbox limits",
             "colorbar_boundary_policy": "first and last visible ticks equal the scalar vmin and vmax",
             "vector_scale_policy": "standard map has no key; save transparent <main_stem>_vector_scale_transparent plus complete <main_stem>_with_vector_scale backup",
@@ -2363,6 +2477,20 @@ def _make_figures(
                 "daily_mean": "黑線；只作顯示用同日算術平均，不改變或取代輸出的逐時 pc_standardized.npy。",
             },
             "daily_gap_break_count": int(daily_gap_after_indices.size),
+            "pc_major_tick_months": list(report_layout.pc_major_tick_months),
+            "pc_major_tick_date_format": report_layout.pc_date_format,
+            "pc_tick_label_font_size": report_layout.pc_tick_label_size,
+            "pc_tick_rotation_degrees": report_layout.pc_tick_rotation_degrees,
+            "pc_tick_policy": (
+                "v8 在跨兩年以上時間窗保留全部逐月 YYYY-MM，並以 270° 直式橫寫、"
+                "8.5 pt 字級與較高畫布避免標籤重疊；單一年同樣逐月但使用 MM。"
+                if config.figure_style == ACADEMIC_REPORT_READY_V8
+                else
+                "v7 在跨兩年以上時間窗使用 1、4、7、10 月的 YYYY-MM 季刻度；"
+                "單一年保留每月 MM，僅降低標籤字級。"
+                if config.figure_style == ACADEMIC_REPORT_READY_V7
+                else "v6 沿用原始每月刻度與字級。"
+            ),
         },
         "academic_visual_references": [
             {

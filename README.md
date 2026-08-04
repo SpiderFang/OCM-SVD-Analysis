@@ -395,10 +395,10 @@ $SVD_OUTPUT_ROOT/
 ```
 
 對外目錄與 `bundle_id` 只保留可讀的 figure style 版本，例如
-`academic_report_ready_v6`，不再附加 hash。來源 metadata、`figures` 設定、renderer
+`academic_report_ready_v8`，不再附加 hash。來源 metadata、`figures` 設定、renderer
 原始碼、繪圖環境與字型仍共同形成完整 `bundle_provenance_sha256`，保存在 bundle
 `metadata.json`。同一版本一旦發布便拒絕覆寫；繪圖程式或視覺規格若要改變，必須先把
-`figures.style` 升版，例如由 v6 升為 v7，不能在同一版本下並存多個 hash 目錄。
+`figures.style` 升版，例如由 v7 升為 v8，不能在同一版本下並存多個 hash 目錄。
 來源科學 run 不新增 `figures/`、不改 metadata，也不複製科學陣列。若要改 DPI、輸出
 格式或 mode count，可另外提供一份已升版的完整設定：
 
@@ -499,7 +499,19 @@ u/v/eta 數值；重排與去重筆數、實際最大缺口、斷點數及覆蓋
 ./scripts/preflight_surface_svd_time_axis.sh
 ```
 
-預檢六區均為 `OK` 後，再啟動正式 batch：
+所有專案 bash 腳本都會在 `<project-root>/logs/` 自動建立一份 UTF-8 JSON 執行日誌，
+檔名包含腳本名稱、UTC 啟動時間與 PID。日誌保存命令列參數、實際採用的輸入根目錄、
+開始／結束時間、exit code 與逐區事件；預檢日誌另含每區 partial month、時間缺口、
+canonicalization 統計與錯誤摘要。`logs/` 屬作業證據，已排除於 Git 版本控制。
+
+預檢六區均為 `OK` 後，再由正式 bash 入口啟動 batch：
+
+```bash
+./scripts/run_surface_svd_batch_available_2024_2025.sh
+```
+
+這個入口會直接產生完整 science run 與其正式圖面；若只需先完成數值成果、延後產圖，仍
+可使用 Python CLI 的 `--no-figures`，但該直接 CLI 呼叫不會自動建立 bash JSON log。
 
 ```bash
 uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
@@ -514,6 +526,26 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
 並引用每區 `metadata.json > input_surface.source_months`、`time_window` 與
 `parallel_execution` 所記錄的實際來源、覆蓋率與運算條件；還必須揭露
 `input_surface.time_axis_canonicalization`。不得稱為 24 個完整月份或無缺口年度資料。
+
+### 已完成科學 run 的 v8 可讀性重繪
+
+既有 `academic_report_ready_v6` 圖若出現跨兩年 PC 的逐月 `YYYY-MM` 標籤重疊，不可
+重跑或覆寫 SVD 科學成果。v8 保留全部逐月 `YYYY-MM`，以 270° 直式橫寫並增加 PC 圖
+下方高度；地圖的經緯度刻度由六個縮為五個，並調低座標／色條字級。平均場、模態圖、PC
+圖與解釋變異圖均共用此版面契約。
+在 SERVER 同步本 repository 的 v8 程式與設定後，執行：
+
+```bash
+./scripts/replot_available_surface_svd_v8.sh "$SVD_OUTPUT_ROOT"
+```
+
+重繪腳本同樣在 `logs/` 產生 JSON 日誌，標示各區為 `queued`、`skipped`、`pending` 或
+`error`，可在 tmux 斷線或批次重跑後確認實際處理狀態。
+
+腳本只重繪已存在的六區 scientific run，並平行建立
+`$SVD_OUTPUT_ROOT/svd_figure_bundles/<run-id>/academic_report_ready_v8/`。它不讀取
+`$OCM_SURFACE_ROOT`、不改寫既有 `svd/<run-id>`、不重新求解 SVD；尚未完成的區域標為
+`PENDING`，可待科學 run 發布後以相同指令再次執行。
 
 ## SVD 方法
 
@@ -643,11 +675,13 @@ PC 與解釋變異與薄型 SVD 完全等價。」
 
 ### 學術圖表：正式成果只交付可自我解釋的報告版
 
-正式設定採 `academic_report_ready_v6`，依海洋流場 SVD 論文的共同表達方式，只交付
+2024–2025 全部可得資料設定採 `academic_report_ready_v8`，依海洋流場 SVD 論文的共同表達方式，只交付
 能在脫離程式碼與 sidecar 後仍可讀懂的完整報告圖：
 
 - `figures/report/*_report.{png,svg}` 是不透明白底的正式報告版，內含區域與模態標題、
-  完整中文解釋變異量、經緯度與單位、η 色條、高解析海岸線、PC 圖例與月份刻度。
+  完整中文解釋變異量、經緯度與單位、η 色條、高解析海岸線、PC 圖例與月份刻度。跨兩年
+  PC 固定保留全部逐月 `YYYY-MM`，並以 270° 直式橫寫避免標籤重疊；地圖經緯度軸為五個
+  含端點刻度。
   經緯度軸與色條都強制顯示實際上下限；SVD 正負號 anchor 不畫在圖上，避免被誤認
   為測站。
 - 每張平均場／模態空間圖另有同 stem 的
@@ -681,7 +715,8 @@ PC 與解釋變異與薄型 SVD 完全等價。」
   疊加 OSMData／OpenStreetMap 高解析向量陸地；暖灰陸地與深灰海岸線只作地理參照，
   不改變 1 km OCM 流場、分析遮罩、SVD 權重或統計。來源 SHA-256 與 ODbL attribution
   會寫入每個 figure bundle。
-- 產圖設定只接受 `academic_report_ready_v6`；程式不保留無文字主圖或透明主圖相容
+- 產圖設定接受 `academic_report_ready_v6`／`academic_report_ready_v7`（既有圖包重現）
+  與目前正式版 `academic_report_ready_v8`；程式不保留無文字主圖或透明主圖相容
   分支，避免六區批次重新產出「拿到檔案仍不知道代表什麼」的交付物。唯一透明資產是
   檔名明示 `_vector_scale_transparent` 的後製參考尺，內容仍保留數值與單位。
 

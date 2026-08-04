@@ -49,7 +49,7 @@
     "policy": "單區以 4 個 I/O worker 平行讀取 2024–2025 共 24 個月檔；來源缺日不跨斷點插補，後續以 4 個受控 BLAS 執行緒求解。"
   },
   "figures": {
-    "style": "academic_report_ready_v6",
+    "style": "academic_report_ready_v8",
     "mode_count": 5,
     "max_quiver_arrows_per_axis": 16,
     "output_formats": ["png", "svg"],

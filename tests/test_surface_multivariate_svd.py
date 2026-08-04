@@ -25,7 +25,14 @@ if str(SOURCE_ROOT) not in sys.path:
 from ocm_svd_analysis.batch import load_batch_config, run_surface_multivariate_svd_batch  # noqa: E402
 from ocm_svd_analysis.replot import replot_surface_multivariate_svd  # noqa: E402
 from ocm_svd_analysis.replot_batch import replot_surface_multivariate_svd_batch  # noqa: E402
-from ocm_svd_analysis.surface_multivariate_svd import load_analysis_config, run_surface_multivariate_svd  # noqa: E402
+from ocm_svd_analysis.surface_multivariate_svd import (  # noqa: E402
+    ACADEMIC_REPORT_READY_V6,
+    ACADEMIC_REPORT_READY_V7,
+    ACADEMIC_REPORT_READY_V8,
+    _academic_report_layout,
+    load_analysis_config,
+    run_surface_multivariate_svd,
+)
 
 
 def write_json(path: Path, payload: dict[str, object]) -> None:
@@ -44,6 +51,7 @@ def make_config(
     known_time_axis_repairs: list[dict[str, object]] | None = None,
     maximum_source_gap_hours: float | None = 2.0,
     time_axis_canonicalization_policy: str = "reject",
+    figure_style: str = ACADEMIC_REPORT_READY_V6,
 ) -> None:
     """建立最小但完整的三變數 SVD 設定，驗證 3×3 AOI 與五個輸出模態。
 
@@ -55,6 +63,8 @@ def make_config(
     但實際斷點仍必須寫入 metadata 供研究報告揭露。
     `time_axis_canonicalization_policy` 則使合成快取可驗證嚴格設定拒絕重複 UTC，而全部
     可得設定會以固定的後出現樣本優先規則產生唯一時間軸。
+    `figure_style` 僅供重繪／版型契約測試切換 v6、v7 與 v8；它不影響快取輸入、遮罩、SVD
+    求解或任何科學數值。
     """
 
     coastline_path = path.parent / "synthetic_land.geojson"
@@ -136,7 +146,7 @@ def make_config(
             "figures": {
                 # 正式測試只交付可直接報告的白底完整標示圖；這裡刻意不提供透明背景
                 # 選項，確保設定契約本身不可能重新啟用缺少標題、單位與圖例的舊素材。
-                "style": "academic_report_ready_v6",
+                "style": figure_style,
                 "mode_count": 5,
                 "max_quiver_arrows_per_axis": 8,
                 # SVG 會保留圖中文字，測試可直接檢查正式標題只使用 SVD；PNG 則用於
@@ -212,6 +222,44 @@ def make_surface_cache(
 
 class SurfaceMultivariateSvdTest(unittest.TestCase):
     """確認 SVD 數值輸出遵守三變數、遮罩與可追溯性契約。"""
+
+    def test_v8_report_layout_keeps_monthly_pc_ticks_with_vertical_horizontal_writing(self) -> None:
+        """v8 必須保留每月 PC 標示且消除年月重疊風險。
+
+        這是純版型單元測試，不繪圖也不需要真實 OCM 資料。它鎖定逐月的月份集合、完整
+        年月格式、較小字級與五個地圖座標刻度，避免未來調整 renderer 時又默默恢復
+        24 個彼此重疊的 `YYYY-MM` 標籤；v8 明確要求 270° 直式橫寫。另確認 v7 的
+        已發布季刻度與 v6 的舊版型仍可重現已發布圖包。
+        """
+
+        v8_multiyear = _academic_report_layout(ACADEMIC_REPORT_READY_V8, (2024, 2025))
+        self.assertEqual(v8_multiyear.pc_major_tick_months, tuple(range(1, 13)))
+        self.assertEqual(v8_multiyear.pc_date_format, "%Y-%m")
+        self.assertEqual(v8_multiyear.pc_tick_label_size, 8.5)
+        self.assertEqual(v8_multiyear.pc_tick_rotation_degrees, 270.0)
+        self.assertEqual(v8_multiyear.pc_figure_height_inches, 4.45)
+        self.assertEqual(v8_multiyear.map_axis_tick_count, 5)
+        self.assertEqual(v8_multiyear.map_tick_label_size, 9.0)
+        self.assertEqual(v8_multiyear.colorbar_tick_label_size, 8.5)
+
+        v8_single_year = _academic_report_layout(ACADEMIC_REPORT_READY_V8, (2025,))
+        self.assertEqual(v8_single_year.pc_major_tick_months, tuple(range(1, 13)))
+        self.assertEqual(v8_single_year.pc_date_format, "%m")
+        self.assertEqual(v8_single_year.pc_tick_rotation_degrees, 270.0)
+
+        v7_multiyear = _academic_report_layout(ACADEMIC_REPORT_READY_V7, (2024, 2025))
+        self.assertEqual(v7_multiyear.pc_major_tick_months, (1, 4, 7, 10))
+        self.assertEqual(v7_multiyear.pc_tick_rotation_degrees, 0.0)
+
+        v6_multiyear = _academic_report_layout(ACADEMIC_REPORT_READY_V6, (2024, 2025))
+        self.assertEqual(v6_multiyear.pc_major_tick_months, tuple(range(1, 13)))
+        self.assertEqual(v6_multiyear.map_axis_tick_count, 6)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config_path = root / "v8_config.json"
+            make_config(config_path, figure_style=ACADEMIC_REPORT_READY_V8)
+            self.assertEqual(load_analysis_config(config_path).figure_style, ACADEMIC_REPORT_READY_V8)
 
     def test_run_writes_expected_arrays_and_records_short_gap_interpolation(self) -> None:
         """一個短 u 缺值應聯合插補三分量且不縮短兩月共 48 個可用時間樣本。"""
