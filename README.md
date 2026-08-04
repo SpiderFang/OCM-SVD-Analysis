@@ -816,6 +816,61 @@ PC 與解釋變異與薄型 SVD 完全等價。」
 為何在深色檢視器看成黑底」的說明，另見
 [`docs/gongliao_2025_svd_report_interpretation.md`](docs/gongliao_2025_svd_report_interpretation.md)。
 
+## 六區 2024–2025 表層 SVD 學術成果報告
+
+正式成果報告由
+[`scripts/reporting/build_six_regions_surface_svd_report.py`](scripts/reporting/build_six_regions_surface_svd_report.py)
+產生。產生器只讀 `work/server_results/2024_2025/svd/<run-id>` 內已發布的科學陣列，及
+`work/server_results/2024_2025/svd_figure_bundles/<run-id>/academic_report_ready_v8`
+圖集；不重新讀取 surface cache、不修改缺值、不重新求解 SVD。報告依六區 batch 順序
+完整納入平均場、解釋變異量、前五模態空間回歸場及前五標準化 PC，共 72 張 PNG。
+所有平均場與空間模態均強制使用檔名含 `_with_vector_scale.png` 的版本，避免交付時遺漏
+箭頭比例尺。
+
+報告方法章逐步記錄共同有效遮罩、短缺口限制、時間軸 canonicalization、距平、u/v 共同
+速度 RMS 與 η RMS 正規化、格點面積平方根權重、空間共變異矩陣特徵分解、與薄型 SVD
+的等價關係、PC 標準化、空間係數、物理回歸場、符號慣例及候選海廢輸送模態判準；RMS、
+loading、PC、EV、正交性與薄型 SVD 均先以白話定義再列公式。聚焦版移除命令列執行流程，
+但保留足以說明資料轉換與矩陣求解的數學契約。聚焦版將六個研究海域視為獨立分析單元，
+每章自行交代邊界、樣本、正規化尺度、平均流、解釋變異量、前五模態及 PC 時序，不設
+區域合併比較章，也不收錄後續工項或內部成果追溯附錄；參考文獻固定由新頁開始。正文、
+標題、公式、表格及圖說的 DOCX 字型均直接指定為「標楷體-繁」，正文為黑色 12 pt，且
+正式版不設頁首；既有 v8 PNG 為版本化成果圖，不由報告產生器重繪或改字型。
+
+使用鎖定的文件依賴環境執行：
+
+```bash
+/path/to/codex-primary-runtime/dependencies/python/bin/python3 \
+  scripts/reporting/build_six_regions_surface_svd_report.py
+```
+
+預設輸出為：
+
+```text
+outputs/reports/指定海域_流場模態萃取時序變化與主導海廢輸送候選模態_聚焦版_v2_2024-2025.docx
+```
+
+原始 1.0 版
+`outputs/reports/六指定海域_表層流場多變量SVD成果與海廢輸送意涵_2024-2025.docx`
+保留不變；聚焦版使用不同檔名，執行產生器時不會覆寫既有報告。
+
+產生器在儲存前會稽核 72 張嵌入圖片與所有固定寬度表格。交付前仍應將 DOCX 渲染為逐頁
+PNG 或 PDF，核對目錄頁碼、中文 fallback、公式、圖說、參考文獻分頁及每一張向量比例尺；
+若增刪正文或圖件，必須重新渲染並同步更新靜態目錄頁碼。
+
+若正式 DOCX 已由研究人員在 Word 內人工修訂，後續專有名詞格式不得重新執行整份報告產生器
+覆寫。可使用 `scripts/reporting/normalize_docx_technical_terms.py` 直接修改既有 OOXML：首次出現
+採「中文全名（English Full Name, ABBR）」；沒有通用縮寫者採「中文名稱（English Term）」；
+後續直接使用縮寫或已定義名稱。工具會先建立完整備份，且每個目標片段必須唯一命中才會寫檔，
+以保留人工調整的段落、圖片、樣式與分頁。
+
+若只需補強正式 DOCX 的「10.7 共用方法限制」，使用
+`scripts/reporting/expand_docx_common_method_limitations.py` 局部修改。工具將原有五個高度濃縮的
+限制擴寫為七項，分別交代模式資料代表性、缺值、分析邊界與尺度、聯合 EV、線性正交基底、
+區域彙整指標及兩年樣本穩健性；每項均說明限制來源、對結果的可能影響與正確解讀界線。
+工具不重建文件，且必須逐字命中鎖定版 10.7 才會寫入；新增內容造成分頁位移時，應先完成
+逐頁渲染，再以 `--reference-page` 回填靜態目錄中的參考文獻頁碼。
+
 ## 本機驗證
 
 ```bash

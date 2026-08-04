@@ -169,13 +169,13 @@ flowchart TD
 
 | 產品 | 狀態 | 變數/權重 | 解釋範圍 |
 |---|---|---|---|
-| `surface_vector_eof` | 必做 | u、v；格面積權重 | 表層水平流場 |
-| `fixed_depth_vector_eof` | 必做 | u、v；格面積權重 | 核定物理深度 |
-| `hab_vector_eof` | 必做 | u、v；格面積權重 | 近底離床高度 |
+| `surface_vector_svd` | 必做 | u、v；格面積權重 | 表層水平流場 |
+| `fixed_depth_vector_svd` | 必做 | u、v；格面積權重 | 核定物理深度 |
+| `hab_vector_svd` | 必做 | u、v；格面積權重 | 近底離床高度 |
 | `full_3d_svd` | 通過資源 pilot 後執行 | u、v、必要時 w；格體積權重 | 整體三維動能結構 |
-| `joint_aoi_eof` | 研究問題需要時 | 東北臺灣等跨區共同 AOI | 比較共同背景模態 |
+| `joint_aoi_svd` | 研究問題需要時 | 東北臺灣等跨區共同 AOI | 比較共同背景模態 |
 
-`surface_vector_eof` 是 7–8 月第一個科學里程碑，但不能被稱為完整三維 SVD。
+`surface_vector_svd` 是 7–8 月第一個科學里程碑，但不能被稱為完整三維 SVD。
 
 ### 6.2 向量 SVD 計算契約
 

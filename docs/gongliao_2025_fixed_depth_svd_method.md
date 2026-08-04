@@ -124,16 +124,16 @@ vertical_bracket_span_m.npy  # (time, lat, lon)
 
 - [Zhang et al. (2016)](https://doi.org/10.1016/j.ocemod.2016.05.002) 說明 SCHISM
   彈性垂向網格；支持不可把相同 layer index 當成相同物理深度。
-- [Faucher et al. (2002)](https://doi.org/10.1029/2000JC000690) 說明垂向 EOF 可由
+- [Faucher et al. (2002)](https://doi.org/10.1029/2000JC000690) 說明垂向 SVD 可由
   模式輸出建立，且選擇 depth／isopycnal coordinate 會改變物理解讀。
 - [Giarolla et al. (2005)](https://doi.org/10.1029/2004GL022206) 以觀測與模式固定深度
-  流速剖面 EOF 描述潛流變動。
+  流速剖面 SVD 描述潛流變動。
 - [Liu and Weisberg (2005)](https://doi.org/10.1029/2004JC002786) 將多站、多層位
-  `u/v` 組成向量 EOF，直接支持比較表層、中層與近底流速模態。
+  `u/v` 組成向量 SVD，直接支持比較表層、中層與近底流速模態。
 - [Oey et al. (2004)](https://doi.org/10.1029/2004JC002345) 顯示垂向座標與空間取樣差異
-  會改變流速 EOF，因此本 family 必須明載共同遮罩與時間政策。
+  會改變流速 SVD，因此本 family 必須明載共同遮罩與時間政策。
 
-這些文獻支持固定物理深度與分層流速 EOF/SVD 的方法選擇，但不自動驗證本次 OCM 的
+這些文獻支持固定物理深度與分層流速 SVD 的方法選擇，但不自動驗證本次 OCM 的
 垂向 datum、模式準確度或物理歸因。正式報告前仍須確認：
 
 1. `zcor` 的單位、正方向與垂向基準；
