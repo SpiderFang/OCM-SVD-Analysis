@@ -79,11 +79,6 @@ REPLACEMENTS: tuple[Replacement, ...] = (
         "重複時間戳採後值優先（prefer-last）方式去重",
     ),
     Replacement(
-        "known-time-axis repair 中文對照",
-        "依版本化 known-time-axis repair 將",
-        "依版本化已知時間軸修正（known-time-axis repair）將",
-    ),
-    Replacement(
         "Mode 首次中英對照",
         "解釋變異量與 Mode 1–5",
         "解釋變異量與模態（Mode）1–5",

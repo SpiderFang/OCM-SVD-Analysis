@@ -168,13 +168,12 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd \
 `configs/gongliao_surface_svd_2025.json` 保留作 12 個完整 `standard_month` 的嚴格
 契約，不會為了現有資料回寫或放寬。
 
-上游 `202507` metadata 另顯示 `20250701_schout.nc` 的 24 筆時間座標錯標成
-`2025-06-30T01:00Z` 至 `2025-07-01T00:00Z`，會和 6 月快取倒序重疊；同月下一個
-`20250702_schout.nc` 則由 `2025-07-02T01:00Z` 正常起算。年度可得資料設定因此以
-`input.known_time_axis_repairs` 明確把前 24 筆平移 24 小時，回復為
-`2025-07-01T01:00Z` 至 `2025-07-02T00:00Z`。程式只有在原始起訖時間完全相符時才套用
-修正，且只改分析記憶體中的 UTC 座標，不覆寫上游 `.npy`、不重排樣本，也不改變
-u/v/eta/valid 數值；套用規則與修正樣本數會寫入成果 metadata。
+針對共用東北臺灣快取的 `202507` 前 24 筆時間座標，專案採用預先登錄的 +24 小時時間軸
+正規化假設：該段原始快取標籤為 `2025-06-30T01:00Z` 至 `2025-07-01T00:00Z`，而相鄰日檔
+命名與後續時序顯示跨月銜接存在不一致。這是專案端為維持分析時間軸內部一致性所作的處置，
+並非原始 NetCDF 資料提供者的更正或確認。`input.known_time_axis_repairs` 是既有設定欄位名稱；
+它只在原始起訖時間完全相符時，於分析記憶體內將前 24 筆時間標籤平移 24 小時。此處置不覆寫
+上游 `.npy`、不重排樣本，也不改變 u/v/eta/valid 數值；假設內容與套用筆數會寫入成果 metadata。
 
 ### 貢寮固定深度 `u(z)/v(z)/eta` 垂向比較 family
 
@@ -327,8 +326,8 @@ $SVD_OUTPUT_ROOT/fixed_depth_svd_figure_bundles/<analysis_label_vN>/academic_rep
 `standard_partial_month`，不跨來源斷點補值，並把實際缺口保留於 metadata。跨月 UTC 倒序或
 重複時，僅在設定明確指定 `sort_and_deduplicate_prefer_last` 時，以同一組索引同步排序／
 去重所有深度的 `u/v/eta`、valid mask 和 bracket span；固定深度 metadata 的
-`paired_input_time_axis` 會完整記錄影響。龜山與貢寮維持 2025-07 已知時間座標修正，但不
-修改任何 native/surface 數值。
+`paired_input_time_axis` 會完整記錄影響。龜山與貢寮對 2025-07 採用預先登錄的時間軸
+正規化假設；此為專案端處置，並非資料提供者確認，且不修改任何 native/surface 數值。
 
 正式 SERVER 必須先執行 paired 預檢；它只讀 metadata、time 軸、grid 對應與陣列 header，
 不建立成果目錄：
@@ -554,7 +553,8 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
 u/v/eta 數值；重排與去重筆數、實際最大缺口、斷點數及覆蓋率皆寫入
 `metadata.json > input_surface.time_axis_canonicalization` 與 `source_time_axis`。canonicalization
 後仍要求唯一 UTC 軸的中位採樣步長符合 1 小時；若不符，必須以 metadata 與研究限制另行說明。
-龜山島與貢寮的共用東北臺灣 cache 另明載 `202507` 前 24 筆 UTC 時間座標的已知修正規則。
+龜山島與貢寮的共用東北臺灣 cache 另明載 `202507` 前 24 筆 UTC 時間座標的預先登錄
+正規化假設；報告須揭露其為專案端處置，而非資料提供者確認。
 
 正式 SVD 前應先執行唯讀預檢器；它只讀 24 個月的 `metadata.json` 與
 `time_utc_ns.npy`，逐區列出 partial 月份、最大來源缺口、斷點數及 canonicalization 的重排／

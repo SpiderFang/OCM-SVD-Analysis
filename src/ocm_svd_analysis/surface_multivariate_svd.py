@@ -133,12 +133,13 @@ def _academic_report_layout(figure_style: str, years: tuple[int, ...]) -> Academ
 
 @dataclass(frozen=True)
 class TimeAxisRepair:
-    """一段已知來源時間軸錯標的顯式修正規則。
+    """一段預先登錄的分析時間軸正規化規則。
 
     `start_index:stop_index` 是單月快取 time 軸的半開區間；只有原始起訖 UTC 與設定完全
-    相符時才會套用 `shift_nanoseconds`。這種雙重鎖定避免日後上游快取已修正或換版後，
-    舊規則仍悄悄移動正確時間。修正只改分析程序記憶體中的時間座標，不覆寫上游 `.npy`
-    或 u/v/eta 數值；原因、樣本數與位移會寫入成果 metadata。
+    相符時才會套用 `shift_nanoseconds`。規則依據是專案端對快取時序所作的假設，並不代表
+    原始 NetCDF 資料提供者已確認時間錯誤；雙重鎖定避免上游快取修正或換版後，舊假設仍
+    悄悄移動正確時間。處置只改分析程序記憶體中的時間座標，不覆寫上游 `.npy` 或 u/v/eta
+    數值；假設理由、樣本數與位移會寫入成果 metadata。
     """
 
     month_id: str
@@ -461,11 +462,11 @@ def _load_known_time_axis_repairs(
     months: tuple[int, ...],
     expected_timestep_hours: float,
 ) -> tuple[TimeAxisRepair, ...]:
-    """驗證可重現的已知時間軸修正，並轉成只供單月讀取器使用的不可變規則。
+    """驗證可重現的預先登錄時間軸正規化假設，並轉成單月讀取器使用的不可變規則。
 
     預設沒有任何修正。每條規則必須鎖定月份、索引區間、原始起訖時間與非零小時位移；
-    區間長度還必須符合設定的固定時間步。這個機制只處理已有來源證據的時間座標錯標，
-    不能拿來填補缺日、建立新樣本或改變任一流場數值。
+    區間長度還必須符合設定的固定時間步。這個機制只執行設定已揭露的專案假設，不能將
+    假設表述為資料提供者已確認的時間錯誤；更不能拿來填補缺日、建立新樣本或改變流場數值。
     """
 
     repairs_raw = input_config.get("known_time_axis_repairs", [])
@@ -839,11 +840,11 @@ def _validate_month_metadata(metadata: dict[str, Any], config: AnalysisConfig, m
 
 
 def _apply_known_time_axis_repairs(time_utc_ns: np.ndarray, config: AnalysisConfig, month_id: str) -> tuple[np.ndarray, int]:
-    """在記憶體副本套用本月份的顯式時間座標修正，回傳時間軸與修正樣本數。
+    """在記憶體副本套用本月份的預先登錄時間軸正規化假設，回傳時間軸與套用樣本數。
 
     規則套用前會逐條比對原始區段的第一與最後時刻，也會檢查索引沒有超界。套用後仍要求
-    單月時間嚴格遞增；因此設定只能更正已知錯標，不能造成重複、倒序或用時間位移掩蓋
-    不明資料。u/v/eta 與 valid mask 的樣本順序完全不動。
+    單月時間嚴格遞增；因此處置只適用於已揭露的專案假設，不能造成重複、倒序或用時間
+    位移掩蓋不明資料。u/v/eta 與 valid mask 的樣本順序完全不動。
     """
 
     repaired = np.asarray(time_utc_ns, dtype=np.int64).copy()
@@ -851,16 +852,16 @@ def _apply_known_time_axis_repairs(time_utc_ns: np.ndarray, config: AnalysisConf
     for repair in config.known_time_axis_repairs:
         if repair.month_id != month_id:
             continue
-        _require(repair.stop_index <= repaired.size, f"{month_id} 已知時間軸修正區間超出 time 軸長度")
+        _require(repair.stop_index <= repaired.size, f"{month_id} 預先登錄時間軸處置區間超出 time 軸長度")
         segment = repaired[repair.start_index : repair.stop_index]
-        _require(segment.size > 0, f"{month_id} 已知時間軸修正區間不可為空")
+        _require(segment.size > 0, f"{month_id} 預先登錄時間軸處置區間不可為空")
         _require(
             int(segment[0]) == repair.expected_original_start_ns and int(segment[-1]) == repair.expected_original_end_ns,
-            f"{month_id} 已知時間軸修正的原始起訖 UTC 不符；上游快取可能已換版，拒絕套用舊規則",
+            f"{month_id} 預先登錄時間軸處置的原始起訖 UTC 不符；上游快取可能已換版，拒絕套用舊假設",
         )
         repaired[repair.start_index : repair.stop_index] = segment + repair.shift_nanoseconds
         repaired_count += int(segment.size)
-    _require(np.all(np.diff(repaired) > 0), f"{month_id} 套用已知修正後 time_utc_ns.npy 必須嚴格遞增")
+    _require(np.all(np.diff(repaired) > 0), f"{month_id} 套用預先登錄時間軸處置後 time_utc_ns.npy 必須嚴格遞增")
     return repaired, repaired_count
 
 
@@ -1013,7 +1014,7 @@ def _canonicalize_source_time_axis(
     """
     處理順序為：
     1. 讀取每個月的 time.npy。
-    2. 先在 `_apply_known_time_axis_repairs` 套用「已知」修正；呼叫點在第 820 行。
+    2. 先在 `_apply_known_time_axis_repairs` 套用預先登錄的時間軸正規化假設；呼叫點在單月讀取流程。
     3. 合併 2024–2025 全部月份後，呼叫 `_canonicalize_source_time_axis`。
     4. 以 UTC 穩定排序、每個重複 UTC 僅保留來源順序中最後一筆，並同步重排 u/v/eta 等資料；排序與去重的實作在第 946-950 行。
     """
@@ -2655,10 +2656,11 @@ def run_surface_multivariate_svd(
             else "此成果使用前處理專案版本化核定分析區；任何 AOI 邊界、cell fraction 或 coverage 規則變更都必須建立新的 analysis unit version 與新的 SVD run。"
         )
         time_axis_repair_limitation = (
-            f"本 run 依設定中的已知來源證據，只在分析記憶體內修正 {loaded.repaired_time_step_count} 筆 UTC 時間座標；"
-            "未覆寫上游快取或改動 u/v/eta/valid 數值。規則詳見 input_surface.known_time_axis_repairs。"
+            f"本 run 依設定中預先登錄、未經原始 NetCDF 資料提供者確認的時間軸正規化假設，"
+            f"只在分析記憶體內調整 {loaded.repaired_time_step_count} 筆 UTC 時間標籤；"
+            "未覆寫上游快取或改動 u/v/eta/valid 數值。假設詳見 input_surface.known_time_axis_repairs。"
             if loaded.repaired_time_step_count
-            else "本 run 未套用任何已知時間軸修正。"
+            else "本 run 未套用任何預先登錄時間軸正規化假設。"
         )
         metadata = {
             "schema_name": "ocm_surface_multivariate_svd",

@@ -33,7 +33,7 @@
         "shift_hours": 24.0,
         "expected_original_start_utc": "2025-06-30T01:00:00Z",
         "expected_original_end_utc": "2025-07-01T00:00:00Z",
-        "reason": "paired native/surface 202507 的前 24 筆來源時間座標已知錯標；依檔名日期與下一日逐時契約在分析記憶體內平移 24 小時，不改 hvel、zcor、eta 或上游快取。"
+        "reason": "專案端依 paired native/surface 共用快取的跨月時序關係，對 202507 前 24 筆採用 +24 小時的預先登錄時間軸正規化假設；此非原始 NetCDF 資料提供者的更正或確認。僅在分析記憶體內調整時間標籤，不改 hvel、zcor、eta 或上游快取。"
       }
     ]
   },

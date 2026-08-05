@@ -33,8 +33,9 @@ ocm_surface/<domain>/months/<YYYYMM>/eta_m.npy
 ```
 
 固定深度管線直接讀取已驗收的 `eta_m.npy`，不從 `zcor`、最上層高度、潮汐公式或固定
-深度速度反推。paired surface/native 的 `time_utc_ns.npy` 必須逐值完全相同；2025 年
-7 月已知的 24 筆時間座標修正只在分析記憶體同步套用，不改變 `eta` 或速度數值。
+深度速度反推。paired surface/native 的 `time_utc_ns.npy` 必須逐值完全相同；對 2025 年
+7 月前 24 筆時間標籤，管線採用專案端預先登錄的 +24 小時時間軸正規化假設。此非原始
+NetCDF 資料提供者的更正或確認，且只在分析記憶體同步套用，不改變 `eta` 或速度數值。
 
 上游 `valid_mask_surface.npy` 只表示表層 `u/v/surface_z` 有效，不能證明 -5、-10 或
 -20 m 有上下包夾層。固定深度逐時有效條件因此重新計算為：

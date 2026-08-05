@@ -34,7 +34,7 @@
         "shift_hours": 24.0,
         "expected_original_start_utc": "2025-06-30T01:00:00Z",
         "expected_original_end_utc": "2025-07-01T00:00:00Z",
-        "reason": "共用東北臺灣 surface cache 的 202507 前 24 筆來源時間座標錯標；只在分析記憶體中平移 24 小時，恢復跨月嚴格遞增 UTC 軸，不改上游 u/v/eta/valid 數值。"
+        "reason": "共用東北臺灣 surface cache 的 202507 前 24 筆，採用專案端依跨月時序關係預先登錄的 +24 小時時間軸正規化假設；此非原始 NetCDF 資料提供者的更正或確認。僅在分析記憶體內調整時間標籤，以維持分析軸一致性，不改上游 u/v/eta/valid 數值。"
       }
     ]
   },
