@@ -53,7 +53,7 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
   --batch-config "$batch_config_path" \
   --surface-root "$surface_root_path" \
   --output-root "$output_root_path" \
-  --allow-partial-months | tee "$batch_summary_path"
+  --allow-partial-months 2>&1 | tee "$batch_summary_path"
 batch_exit_code="${PIPESTATUS[0]}"
 set -e
 

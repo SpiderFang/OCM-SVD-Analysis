@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0.0",
+  "analysis_kind": "surface_multivariate_svd_batch",
+  "batch_label": "lienchiang_beigan_nangan_surface_u_v_eta_available_2024_2025_v1",
+  "purpose": "僅重跑北竿與南竿更新後 v1 AOI。兩區均讀取既有 lienchiang_common_cache_v3 的 2024–2025 全部可得表層 u/v/eta；接受 standard_partial_month，來源缺日不跨斷點插補，跨月份 UTC 倒序或重複時次以穩定排序後每個 UTC 保留最後出現樣本處理。既有 SVD run 不得覆寫。",
+  "source_analysis_units_config": "OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json",
+  "source_analysis_units_config_sha256": "3595fe53a75796ed21da0c0fe651724fd536f96508848e745532fa6d5d36256a",
+  "parallel_execution": {
+    "server_minimum_cpu_cores": 8,
+    "max_concurrent_regions": 2,
+    "per_region_linear_algebra_threads": 4,
+    "per_region_io_workers": 4,
+    "policy": "同時執行北竿與南竿兩個獨立 v1 分析；每區讀取期間使用 4 個 I/O worker，求解期間使用 4 個受 threadpoolctl 限制的 BLAS 執行緒。BLAS 理論上限為 2 x 4 = 8 核；兩區雖可有 AOI 重疊，仍各自保留所屬 AOI 內的有效 cell center 並獨立求解。"
+  },
+  "region_configs": [
+    {"analysis_unit_id": "beigan_surface_svd_aoi_v1", "config": "beigan_surface_svd_available_2024_2025.json"},
+    {"analysis_unit_id": "nangan_surface_svd_aoi_v1", "config": "nangan_surface_svd_available_2024_2025.json"}
+  ]
+}

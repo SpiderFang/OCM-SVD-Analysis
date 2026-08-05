@@ -729,11 +729,45 @@ class SurfaceMultivariateSvdTest(unittest.TestCase):
         source_hash = hashlib.sha256(source_bytes).hexdigest()
         source_payload = json.loads(source_bytes.decode("utf-8"))
         upstream_units = {unit["analysis_unit_id"]: unit for unit in source_payload["analysis_units"]}
-        batch = load_batch_config(PROJECT_ROOT / "configs" / "six_regions_surface_svd_2025_batch.json")
+        batch = load_batch_config(PROJECT_ROOT / "configs" / "six_regions_surface_svd_available_2024_2025_batch.json")
         self.assertEqual(batch.source_analysis_units_config_sha256, source_hash)
         for region in batch.regions:
             downstream = load_analysis_config(region.config_path)
             upstream = upstream_units[region.analysis_unit_id]
+            self.assertEqual(downstream.source_analysis_units_config_sha256, source_hash)
+            self.assertEqual(downstream.domain_id, upstream["flow_domain_id"])
+            self.assertEqual(list(downstream.bbox), upstream["analysis_bbox"])
+            self.assertEqual(list(downstream.anchor_lonlat), upstream["anchor_lonlat"])
+            self.assertEqual(downstream.approval_status, upstream["approval_status"])
+            self.assertEqual(downstream.spatial_mask_policy, "analysis_bbox_cell_center")
+
+    def test_lienchiang_updated_v1_configs_match_preprocessing_analysis_unit_contract(self) -> None:
+        """北竿／南竿更新後 AOI 必須直接對齊 v1，並由兩區 batch 個別重跑。
+
+        研究團隊指定不另建 v2，因此此測試鎖定更新後 v1 的檔案 SHA-256、兩個 AOI 與兩區
+        batch 的平行上限。若有人只修改 SVD bbox、遺漏 upstream SHA，或把兩區誤接回舊設定，
+        本測試必須在送往 SERVER 前拒絕該組合。
+        """
+
+        preprocessing_config = PROJECT_ROOT.parent / "OCM-Data-Preprocessing" / "configs" / "ocm_svd_analysis_units_v1.json"
+        source_bytes = preprocessing_config.read_bytes()
+        source_hash = hashlib.sha256(source_bytes).hexdigest()
+        source_payload = json.loads(source_bytes.decode("utf-8"))
+        upstream_units = {unit["analysis_unit_id"]: unit for unit in source_payload["analysis_units"]}
+        batch = load_batch_config(PROJECT_ROOT / "configs" / "lienchiang_surface_svd_available_2024_2025_batch.json")
+
+        self.assertEqual(batch.source_analysis_units_config, "OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json")
+        self.assertEqual(batch.source_analysis_units_config_sha256, source_hash)
+        self.assertEqual(batch.max_concurrent_regions, 2)
+        self.assertEqual(batch.per_region_linear_algebra_threads, 4)
+        self.assertEqual(
+            [region.analysis_unit_id for region in batch.regions],
+            ["beigan_surface_svd_aoi_v1", "nangan_surface_svd_aoi_v1"],
+        )
+        for region in batch.regions:
+            downstream = load_analysis_config(region.config_path)
+            upstream = upstream_units[region.analysis_unit_id]
+            self.assertTrue(downstream.analysis_label.endswith("_v1"))
             self.assertEqual(downstream.source_analysis_units_config_sha256, source_hash)
             self.assertEqual(downstream.domain_id, upstream["flow_domain_id"])
             self.assertEqual(list(downstream.bbox), upstream["analysis_bbox"])

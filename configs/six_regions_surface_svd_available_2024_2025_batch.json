@@ -4,7 +4,7 @@
   "batch_label": "six_regions_surface_u_v_eta_available_2024_2025_v1",
   "purpose": "在至少配置 32 個 CPU 核心的 SERVER 上，平行執行六個 OCM-Data-Preprocessing 分析單元的 2024–2025 全部可得表層 u/v/eta SVD。各區納入 ready 的完整月與 partial 月；來源缺日不跨斷點插補，跨月份 UTC 倒序或重複時次以穩定排序後每個 UTC 保留最後出現樣本處理。所有成果必須報告實際時間覆蓋率、缺日月份、重排與去重筆數。",
   "source_analysis_units_config": "OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json",
-  "source_analysis_units_config_sha256": "4af676a1560833c19f527432ca57d4e4bf0a83cdf79a1e32aa1f471fba7f7c28",
+  "source_analysis_units_config_sha256": "3595fe53a75796ed21da0c0fe651724fd536f96508848e745532fa6d5d36256a",
   "parallel_execution": {
     "server_minimum_cpu_cores": 32,
     "max_concurrent_regions": 6,

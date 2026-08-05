@@ -77,15 +77,16 @@ ocm_surface/
 
 新增一個研究區時，請依下列順序處理：
 
-1. **先定義上游分析單元。** 在 `OCM-Data-Preprocessing` 建立新的
-   `ocm_svd_analysis_units_v2.json`（保留 v1 不改寫），加入唯一的 `analysis_unit_id`、名稱、
+1. **先定義上游分析單元。** 在 `OCM-Data-Preprocessing` 更新唯一的
+   `ocm_svd_analysis_units_v1.json`，加入或調整已核定的 `analysis_unit_id`、名稱、
    `candidate` 或 `approved` 狀態、所屬 `flow_domain_id`、`analysis_bbox`、區內 anchor、
-   幾何與 coverage 門檻。地理範圍或核定狀態改變也是新版本，不可回頭修改舊版。
+   幾何與 coverage 門檻。地理範圍或核定狀態改變後，所有仍引用此 v1 的下游設定都必須同步
+   更新 SHA-256 與對應欄位，避免同名設定在兩端代表不同範圍。
 2. **先有可用的 surface cache。** 新區域必須落在已發布的 flow domain；若沒有，就先由
    前處理專案建立相應的 schema 3 `ocm_surface/<flow_domain_id>/`。只新增 SVD JSON 不會產生
    u、v、eta、格點面積或遮罩資料。
 3. **計算並鎖定上游版本。** 對新的上游 JSON 執行
-   `shasum -a 256 OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v2.json`，把完整小寫
+   `shasum -a 256 OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json`，把完整小寫
    雜湊填入新 SVD JSON 的 `source_analysis_units_config_sha256`。
 4. **從相近區域複製 SVD 設定，再逐欄更新。** 新檔可命名為
    `configs/<region>_surface_svd_<year>.json`；更新 `analysis_label` 與 `purpose`，並把 `focus`
@@ -99,7 +100,7 @@ ocm_surface/
    上游版本與 SHA，並新增 `region_configs` 項目。
 6. **更新跨專案契約測試。** 目前
    `test_six_svd_configs_match_preprocessing_analysis_unit_contract` 固定檢查 v1 的六區；新增正式
-   區域或升版為 v2 時，必須更新此測試的上游檔名與預期分析單元集合，讓 CI 繼續攔截兩端
+   區域或更新 AOI 時，必須更新此測試的預期分析單元集合與同步欄位，讓 CI 繼續攔截兩端
    bbox、anchor、flow domain 或核定狀態不一致的情況。
 
 新區若只是同一個主分析區內的觀測站、受體點或局地作圖位置，通常不應建立另一份獨立
@@ -570,6 +571,43 @@ canonicalization 統計與錯誤摘要。`logs/` 屬作業證據，已排除於 
 
 這個入口會直接產生完整 science run 與其正式圖面；若只需先完成數值成果、延後產圖，仍
 可使用 Python CLI 的 `--no-figures`，但該直接 CLI 呼叫不會自動建立 bash JSON log。
+
+### 北竿／南竿 AOI 更新後重跑
+
+北竿與南竿 AOI 直接依前處理專案
+[`ocm_svd_analysis_units_v1.json`](/Users/mustlab/Workspace/OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json)
+更新；北竿範圍為 `[119.93, 120.04, 26.18, 26.30]`，南竿範圍為
+`[119.88, 120.00, 26.10, 26.19]`；兩者
+在重疊帶各自獨立納入有效 cell center。兩區皆完整位於既有
+`lienchiang_common_cache_v3`，所以只要 2024–2025 月份快取仍為 `ready`，不需要重跑
+前處理。
+
+先將兩個 repository 的更新檔案同步至 SERVER，並在 SVD 專案執行只讀預檢：
+
+```bash
+./scripts/preflight_surface_svd_time_axis.sh \
+  configs/lienchiang_surface_svd_available_2024_2025_batch.json \
+  "$OCM_SURFACE_ROOT"
+```
+
+兩區均顯示 `OK` 後，在 tmux 內直接執行正式入口：
+
+```bash
+./scripts/run_lienchiang_surface_svd_available_2024_2025.sh
+```
+
+該入口預設同時求解北竿與南竿、接受已核定的 `standard_partial_month`、保留完整 v8 報告
+圖，並在 `logs/` 分別留下預檢與 batch JSON 日誌。若 SERVER 中斷後只有其中一區已原子發布，
+才明確使用下列方式續跑；它只重用設定雜湊相同的已完成 run，絕不覆寫更新前成果：
+
+```bash
+SVD_SKIP_EXISTING=1 ./scripts/run_lienchiang_surface_svd_available_2024_2025.sh
+```
+
+成果會建立在 `$SVD_OUTPUT_ROOT/svd/` 下的
+`beigan_surface_u_v_eta_available_2024_2025_v1_<config-hash>` 與
+`nangan_surface_u_v_eta_available_2024_2025_v1_<config-hash>`；更新前目錄雖使用相同 label，
+但其 config hash 不同，仍是舊 AOI 的獨立成果，不能與更新後圖表或統計混用。
 
 ```bash
 uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
