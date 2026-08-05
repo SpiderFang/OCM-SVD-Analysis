@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -139,6 +140,91 @@ def _sha256_string(value: object, field: str) -> str:
     ):
         raise ValueError(f"{field} 必須是小寫 64 字元 SHA-256")
     return value
+
+
+def validate_fixed_depth_batch_source_contract(
+    batch: FixedDepthBatchConfig,
+    source_analysis_units_config_path: Path,
+) -> str:
+    """驗證固定深度 batch 與實際前處理分析單元檔完全相符。
+
+    ``source_analysis_units_config_sha256`` 不能只在 batch 與六份固定深度設定之間互相
+    比對，否則兩者同時殘留舊值時仍會錯把已變更的 AOI 當成有效契約。本函式直接讀取
+    前處理專案的 JSON 位元組並計算 SHA-256，接著以 ``analysis_unit_id`` 對照每一區的
+    flow domain、封閉 cell-center bbox、anchor、核定狀態，以及設定內有明載時的附屬
+    局地位置。它只讀取小型設定檔，不讀取任何 native/surface 流場，也不建立 SVD
+    輸出；供預檢與 CI 在大型 I/O 前阻止上游 AOI 更新後仍以舊固定深度設定求解的情況。
+
+    回傳實際檔案的 SHA-256，讓呼叫端可寫入非科學數值的預檢日誌。檔案不存在、格式不合
+    或任一區不一致時會拋出例外，呼叫端不得繼續執行正式 fixed-depth family。
+    """
+
+    source_path = source_analysis_units_config_path.resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError(f"找不到前處理分析單元設定檔: {source_path}")
+    source_bytes = source_path.read_bytes()
+    source_hash = hashlib.sha256(source_bytes).hexdigest()
+    _require(
+        source_hash == batch.source_analysis_units_config_sha256,
+        "固定深度 batch 的 source_analysis_units_config_sha256 與實際前處理設定檔不一致；"
+        f"設定值={batch.source_analysis_units_config_sha256}，實際值={source_hash}",
+    )
+    try:
+        source_payload = json.loads(source_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"前處理分析單元設定檔不是有效 UTF-8 JSON: {source_path}") from error
+    raw_units = source_payload.get("analysis_units")
+    if not isinstance(raw_units, list):
+        raise ValueError("前處理分析單元設定檔缺少 analysis_units 清單")
+    upstream_units: dict[str, dict[str, Any]] = {}
+    for index, raw_unit in enumerate(raw_units):
+        if not isinstance(raw_unit, dict):
+            raise ValueError(f"前處理 analysis_units[{index}] 必須是物件")
+        unit_id = raw_unit.get("analysis_unit_id")
+        if not isinstance(unit_id, str) or not unit_id.strip():
+            raise ValueError(f"前處理 analysis_units[{index}].analysis_unit_id 必須是非空白文字")
+        _require(unit_id not in upstream_units, f"前處理 analysis_unit_id 重複: {unit_id}")
+        upstream_units[unit_id] = raw_unit
+
+    for execution_group in batch.execution_groups:
+        for region in execution_group.regions:
+            upstream = upstream_units.get(region.analysis_unit_id)
+            _require(
+                upstream is not None,
+                f"前處理設定檔缺少固定深度區域 {region.analysis_unit_id}",
+            )
+            # fixed-depth 的表層參考與三個 z level 必須使用上游核定 AOI 的同一組 cell
+            # center；若只比對 hash 而未逐欄比對，手動誤改單區設定仍可能逃過檢查。
+            focus = region.config.base.raw["focus"]
+            _require(
+                focus.get("flow_domain_id") == upstream.get("flow_domain_id"),
+                f"{region.config_path.name} 的 flow_domain_id 與前處理 {region.analysis_unit_id} 不一致",
+            )
+            _require(
+                focus.get("bbox_lon_lat") == upstream.get("analysis_bbox"),
+                f"{region.config_path.name} 的 bbox_lon_lat 與前處理 {region.analysis_unit_id} 不一致",
+            )
+            _require(
+                focus.get("anchor_lonlat") == upstream.get("anchor_lonlat"),
+                f"{region.config_path.name} 的 anchor_lonlat 與前處理 {region.analysis_unit_id} 不一致",
+            )
+            _require(
+                focus.get("approval_status") == upstream.get("approval_status"),
+                f"{region.config_path.name} 的 approval_status 與前處理 {region.analysis_unit_id} 不一致",
+            )
+            # 四個 candidate 區仍以 source_focus_plan 追溯局地候選框，北竿／南竿則把
+            # subordinate_focus_ids 寫入本設定。兩種歷史契約都有效，故僅在後者明載時
+            # 比對，避免把無關的追溯格式差異誤判成 AOI 不一致。
+            if "subordinate_focus_ids" in focus:
+                _require(
+                    focus["subordinate_focus_ids"] == upstream.get("subordinate_focus_ids", []),
+                    f"{region.config_path.name} 的 subordinate_focus_ids 與前處理 {region.analysis_unit_id} 不一致",
+                )
+            _require(
+                focus.get("spatial_mask_policy") == "analysis_bbox_cell_center",
+                f"{region.config_path.name} 必須以 analysis_bbox_cell_center 選取固定深度共同遮罩",
+            )
+    return source_hash
 
 
 def load_fixed_depth_batch_config(batch_config_path: Path) -> FixedDepthBatchConfig:

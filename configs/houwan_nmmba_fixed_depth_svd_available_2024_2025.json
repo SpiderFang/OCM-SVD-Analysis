@@ -13,7 +13,7 @@
     "anchor_lonlat": [120.699334, 22.045753],
     "analysis_unit_id": "houwan_nmmba_surface_svd_candidate_v3",
     "source_analysis_units_config": "OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json",
-    "source_analysis_units_config_sha256": "4af676a1560833c19f527432ca57d4e4bf0a83cdf79a1e32aa1f471fba7f7c28",
+    "source_analysis_units_config_sha256": "3595fe53a75796ed21da0c0fe651724fd536f96508848e745532fa6d5d36256a",
     "spatial_mask_policy": "analysis_bbox_cell_center",
     "source_focus_plan": "OCM-Data-Preprocessing/configs/ocm_focus_bboxes_candidate_v3.json"
   },

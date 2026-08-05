@@ -17,6 +17,7 @@ from ocm_svd_analysis.fixed_depth_multivariate_svd import (
 from ocm_svd_analysis.fixed_depth_batch import (
     load_fixed_depth_batch_config,
     run_fixed_depth_multivariate_svd_batch,
+    validate_fixed_depth_batch_source_contract,
 )
 from ocm_svd_analysis.fixed_depth_replot import (
     replot_fixed_depth_multivariate_svd,
@@ -507,6 +508,47 @@ class FixedDepthMultivariateSvdTest(unittest.TestCase):
                     "fixed_depth_multivariate_svd",
                 )
                 self.assertIn("fixed_depth", region.config_path.name)
+
+    def test_six_region_fixed_depth_configs_match_current_preprocessing_aoi_contract(self) -> None:
+        """固定深度六區設定必須追隨前處理 AOI 的實際版本與逐區欄位。
+
+        固定深度 family 雖另有 ``fixed_depth_svd/`` 命名空間，表層參考、z=-5/-10/-20 m
+        仍須以同一個上游 cell-center AOI 建立共同遮罩。此測試直接讀取相鄰前處理專案的
+        正式 JSON，除了 SHA-256 外亦檢查北竿／南竿擴大後 bbox；避免 batch 與六份設定
+        同時保留舊雜湊而在 SERVER 靜默產出不可與新版表層比較的成果。
+        """
+
+        source_path = (
+            PROJECT_ROOT.parent
+            / "OCM-Data-Preprocessing"
+            / "configs"
+            / "ocm_svd_analysis_units_v1.json"
+        )
+        source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        batch = load_fixed_depth_batch_config(
+            PROJECT_ROOT
+            / "configs"
+            / "six_regions_fixed_depth_svd_available_2024_2025_batch.json"
+        )
+
+        self.assertEqual(batch.source_analysis_units_config_sha256, source_hash)
+        self.assertEqual(
+            validate_fixed_depth_batch_source_contract(batch, source_path),
+            source_hash,
+        )
+        regions = {
+            region.analysis_unit_id: region
+            for group in batch.execution_groups
+            for region in group.regions
+        }
+        self.assertEqual(
+            list(regions["beigan_surface_svd_aoi_v1"].config.base.bbox),
+            [119.93, 120.04, 26.18, 26.30],
+        )
+        self.assertEqual(
+            list(regions["nangan_surface_svd_aoi_v1"].config.base.bbox),
+            [119.88, 120.00, 26.10, 26.19],
+        )
 
     def test_fixed_depth_batch_publishes_only_fixed_depth_namespace_and_can_resume(self) -> None:
         """固定深度 batch 應發布獨立 family，恢復時只跳過既有 fixed-depth run。

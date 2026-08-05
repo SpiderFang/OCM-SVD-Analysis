@@ -341,6 +341,12 @@ export SVD_OUTPUT_ROOT=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_resu
 ./scripts/preflight_fixed_depth_svd_available_2024_2025.sh
 ```
 
+預檢會先以實際檔案 SHA-256 與逐區 `flow_domain_id`、cell-center AOI、anchor、核定狀態
+及附屬局地位置，驗證六份固定深度設定均與前處理分析單元契約一致；任一項不符即停止，
+不開始讀取 `hvel/zcor`。預設讀取相鄰 repository 的
+`../OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json`；若 SERVER 採不同佈署
+位置，必須先設定 `OCM_ANALYSIS_UNITS_CONFIG=/absolute/path/to/ocm_svd_analysis_units_v1.json`。
+
 預檢六區均為 `OK` 後，以固定深度專用 batch 執行：
 
 ```bash
@@ -597,7 +603,18 @@ canonicalization 統計與錯誤摘要。`logs/` 屬作業證據，已排除於 
 ```
 
 該入口預設同時求解北竿與南竿、接受已核定的 `standard_partial_month`、保留完整 v8 報告
-圖，並在 `logs/` 分別留下預檢與 batch JSON 日誌。若 SERVER 中斷後只有其中一區已原子發布，
+圖於各自 `svd/<run-id>/figures/`，並在 `logs/` 分別留下預檢與 batch JSON 日誌。若要建立
+成果報告使用的獨立 v8 figure bundle，必須再執行原本的六區重繪入口：
+
+```bash
+./scripts/replot_available_surface_svd_v8.sh "$SVD_OUTPUT_ROOT"
+```
+
+此單一六區重繪入口會比較排除 `figures` 後的完整設定內容，精確選取北竿／南竿更新後 AOI
+對應的 science run；舊 AOI run 不會被選取。其餘四區仍使用唯一的既有 science run，且只
+以目前 v8 figures 規格重繪，不修改其歷史科學設定。圖包發布於
+`$SVD_OUTPUT_ROOT/svd_figure_bundles/<新-run-id>/academic_report_ready_v8/`，且不讀取
+surface cache 或重新求解 SVD。若 SERVER 中斷後只有其中一區已原子發布，
 才明確使用下列方式續跑；它只重用設定雜湊相同的已完成 run，絕不覆寫更新前成果：
 
 ```bash

@@ -17,13 +17,16 @@ cd "$project_root"
 source "$script_dir/json_run_log.sh"
 ocm_svd_json_log_initialize "$project_root" "$(basename -- "$0")" "$@"
 
-# 預設固定深度 batch；三個位置參數可供不同 SERVER 或鏡像快取重用，但不可改變科學設定。
+# 預設固定深度 batch；前三個位置參數可供不同 SERVER 或鏡像快取重用。第四個參數（或
+# OCM_ANALYSIS_UNITS_CONFIG）明確指定前處理 AOI 契約，避免 SERVER 工作目錄不同而誤讀舊檔。
 batch_config_path="${1:-configs/six_regions_fixed_depth_svd_available_2024_2025_batch.json}"
 native_root_path="${2:-${OCM_NATIVE_ROOT:-}}"
 surface_root_path="${3:-${OCM_SURFACE_ROOT:-}}"
+analysis_units_config_path="${4:-${OCM_ANALYSIS_UNITS_CONFIG:-$project_root/../OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json}}"
 ocm_svd_json_log_context "batch_config_path" "$batch_config_path"
 ocm_svd_json_log_context "native_root_path" "$native_root_path"
 ocm_svd_json_log_context "surface_root_path" "$surface_root_path"
+ocm_svd_json_log_context "analysis_units_config_path" "$analysis_units_config_path"
 preflight_summary_path="$(mktemp "$project_root/logs/.preflight_fixed_depth_svd_summary_XXXXXX")"
 ocm_svd_json_log_attach_json_file "preflight_summary" "$preflight_summary_path"
 
@@ -32,16 +35,16 @@ if [[ -z "$native_root_path" || -z "$surface_root_path" ]]; then
   echo "錯誤：請設定 OCM_NATIVE_ROOT 與 OCM_SURFACE_ROOT，或以第二、第三個位置參數提供。" >&2
   exit 2
 fi
-if [[ ! -f "$batch_config_path" || ! -d "$native_root_path" || ! -d "$surface_root_path" ]]; then
-  ocm_svd_json_log_event "error" "runtime_paths" "batch 或 paired cache 根目錄不存在"
-  echo "錯誤：batch 設定、native root 或 surface root 不存在。" >&2
+if [[ ! -f "$batch_config_path" || ! -d "$native_root_path" || ! -d "$surface_root_path" || ! -f "$analysis_units_config_path" ]]; then
+  ocm_svd_json_log_event "error" "runtime_paths" "batch、paired cache 或前處理 AOI 設定路徑不存在"
+  echo "錯誤：batch 設定、native root、surface root 或前處理分析單元設定檔不存在。" >&2
   exit 2
 fi
 
 # 內嵌 Python 只重用正式固定深度 loader 的驗證規則；它以 mmap 開啟檔頭檢查 shape，
 # 不將 hvel/zcor 或 u/v/eta 實體化到 RAM。每區獨立記錄錯誤，讓一次預檢就能診斷全部六區。
 uv run --frozen --no-sync --python 3.12.13 python3 - \
-  "$batch_config_path" "$native_root_path" "$surface_root_path" "$preflight_summary_path" <<'PY'
+  "$batch_config_path" "$native_root_path" "$surface_root_path" "$analysis_units_config_path" "$preflight_summary_path" <<'PY'
 from __future__ import annotations
 
 import json
@@ -50,7 +53,10 @@ from pathlib import Path
 
 import numpy as np
 
-from ocm_svd_analysis.fixed_depth_batch import load_fixed_depth_batch_config
+from ocm_svd_analysis.fixed_depth_batch import (
+    load_fixed_depth_batch_config,
+    validate_fixed_depth_batch_source_contract,
+)
 from ocm_svd_analysis.fixed_depth_multivariate_svd import _load_fixed_depth_grid
 from ocm_svd_analysis.surface_multivariate_svd import (
     _apply_known_time_axis_repairs,
@@ -60,7 +66,7 @@ from ocm_svd_analysis.surface_multivariate_svd import (
 )
 
 
-def write_summary(path: Path, batch_path: Path, native_root: Path, surface_root: Path, regions: list[dict[str, object]]) -> None:
+def write_summary(path: Path, batch_path: Path, native_root: Path, surface_root: Path, analysis_units_config: Path, regions: list[dict[str, object]]) -> None:
     """將不含流場數值的 paired 檢查摘要交給外層 JSON logger。
 
     結果保存每區 grid/node 契約、partial 月份、UTC canonicalization 與錯誤文字；不寫入
@@ -73,6 +79,7 @@ def write_summary(path: Path, batch_path: Path, native_root: Path, surface_root:
                 "batch_config_path": str(batch_path),
                 "native_root_path": str(native_root),
                 "surface_root_path": str(surface_root),
+                "analysis_units_config_path": str(analysis_units_config),
                 "result_namespace": "fixed_depth_svd",
                 "regions": regions,
             },
@@ -176,7 +183,7 @@ def check_region(region, native_root: Path, surface_root: Path) -> dict[str, obj
     }
 
 
-def main(batch_path: Path, native_root: Path, surface_root: Path, summary_path: Path) -> int:
+def main(batch_path: Path, native_root: Path, surface_root: Path, analysis_units_config: Path, summary_path: Path) -> int:
     """執行全部區域預檢，任何失敗皆回報但不建立 fixed-depth 成果。"""
 
     results: list[dict[str, object]] = []
@@ -184,9 +191,17 @@ def main(batch_path: Path, native_root: Path, surface_root: Path, summary_path: 
         batch = load_fixed_depth_batch_config(batch_path)
     except Exception as error:
         results.append({"status": "failed", "analysis_unit_id": None, "error": str(error)})
-        write_summary(summary_path, batch_path, native_root, surface_root, results)
+        write_summary(summary_path, batch_path, native_root, surface_root, analysis_units_config, results)
         print(f"FAIL fixed-depth batch_config: {error}")
         return 1
+    try:
+        actual_source_hash = validate_fixed_depth_batch_source_contract(batch, analysis_units_config)
+    except Exception as error:
+        results.append({"status": "failed", "analysis_unit_id": None, "error": str(error)})
+        write_summary(summary_path, batch_path, native_root, surface_root, analysis_units_config, results)
+        print(f"FAIL fixed-depth 上游 AOI 契約: {error}")
+        return 1
+    print(f"OK   fixed-depth 上游 AOI 契約 sha256={actual_source_hash}")
     failed = False
     for execution_group in batch.execution_groups:
         for region in execution_group.regions:
@@ -199,12 +214,12 @@ def main(batch_path: Path, native_root: Path, surface_root: Path, summary_path: 
                 failed = True
                 results.append({"status": "failed", "analysis_unit_id": region.analysis_unit_id, "execution_group_id": execution_group.execution_group_id, "error": str(error)})
                 print(f"FAIL {region.analysis_unit_id}: {error}")
-    write_summary(summary_path, batch_path, native_root, surface_root, results)
+    write_summary(summary_path, batch_path, native_root, surface_root, analysis_units_config, results)
     return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 5:
-        raise SystemExit("預檢器內部參數錯誤：預期 batch、native root、surface root、摘要 JSON")
-    raise SystemExit(main(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])))
+    if len(sys.argv) != 6:
+        raise SystemExit("預檢器內部參數錯誤：預期 batch、native root、surface root、前處理 AOI 設定、摘要 JSON")
+    raise SystemExit(main(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]), Path(sys.argv[5])))
 PY

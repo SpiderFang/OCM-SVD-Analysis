@@ -4,7 +4,7 @@
   "batch_label": "six_regions_fixed_depth_u_v_eta_available_2024_2025_v1",
   "purpose": "以分組依序執行方式建立六區 2024–2025 全部可得資料的 fixed-depth u/v/eta SVD family。此批次只發布 fixed_depth_svd 與 fixed_depth_svd_figure_bundles，絕不讀取、覆寫或重繪表層 svd 成果。同一執行組禁止同時讀取相同 native 資料區域，以控制 NFS 分散索引 I/O 與記憶體壓力。",
   "source_analysis_units_config": "OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json",
-  "source_analysis_units_config_sha256": "4af676a1560833c19f527432ca57d4e4bf0a83cdf79a1e32aa1f471fba7f7c28",
+  "source_analysis_units_config_sha256": "3595fe53a75796ed21da0c0fe651724fd536f96508848e745532fa6d5d36256a",
   "result_namespace": "fixed_depth_svd",
   "figure_bundle_namespace": "fixed_depth_svd_figure_bundles",
   "parallel_execution": {
