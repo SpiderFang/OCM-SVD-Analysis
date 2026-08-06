@@ -52,6 +52,9 @@ ACADEMIC_REPORT_READY_V7 = "academic_report_ready_v7"
 ACADEMIC_REPORT_READY_V8 = "academic_report_ready_v8"
 """正式圖面版本；保留逐月 PC，將完整年月標籤依指定方向垂直排列。"""
 
+ACADEMIC_REPORT_READY_V9 = "academic_report_ready_v9"
+"""最新正式圖面版本；沿用 v8 版型並納入中英文術語與科學單位的最新圖面文字契約。"""
+
 
 @dataclass(frozen=True)
 class AcademicReportLayout:
@@ -75,14 +78,14 @@ class AcademicReportLayout:
 def _academic_report_layout(figure_style: str, years: tuple[int, ...]) -> AcademicReportLayout:
     """回傳指定圖面版本與時間窗適用的固定刻度版型。
 
-    v8 對跨兩年以上的 PC 保留 24 個逐月 `YYYY-MM` 標籤，並依使用者指定方向旋轉為
+    v8/v9 對跨兩年以上的 PC 保留 24 個逐月 `YYYY-MM` 標籤，並依使用者指定方向旋轉為
     270° 的直式橫寫、降低字級與增加圖高，避免標籤互相覆蓋卻不隱藏任何月份。v7 的
     季刻度與 v6 的舊版型均保留，以重現已發布圖包。空間圖的 v7/v8 都由六個經緯度
     刻度縮為五個並略降字級，保留兩端實際邊界且給色條與座標標籤足夠留白。此函式只
     決定顯示，絕不篩選、重排或變更時間軸資料。
     """
 
-    if figure_style == ACADEMIC_REPORT_READY_V8:
+    if figure_style in {ACADEMIC_REPORT_READY_V8, ACADEMIC_REPORT_READY_V9}:
         return AcademicReportLayout(
             pc_major_tick_months=tuple(range(1, 13)),
             pc_date_format="%m" if len(years) == 1 else "%Y-%m",
@@ -128,6 +131,39 @@ def _academic_report_layout(figure_style: str, years: tuple[int, ...]) -> Academ
         map_axis_tick_count=6,
         map_tick_label_size=10.0,
         colorbar_tick_label_size=9.0,
+    )
+
+
+def _plot_focus_name_zh(focus_name_zh: str) -> str:
+    """回傳可公開呈現在圖表標題的簡化海域名稱。
+
+    設定檔中的 ``name_zh`` 同時承載區域名稱與 AOI 審查狀態，例如「貢寮海域候選框」或
+    「北竿海域 SVD 核定區」。後者必須繼續保留在設定、metadata 與限制說明，才能追溯
+    分析邊界的科學治理脈絡；但圖表是供簡報與報告引用的視覺成果，不應將候選或核定等
+    容易被誤解為結論的字樣當成標題的一部分。因此僅在繪圖前移除這兩個顯示後綴，輸入
+    為完整設定名稱，輸出一律為「XX海域」。未知名稱不任意截斷，以避免遮蔽設定錯誤。
+    """
+
+    return (
+        focus_name_zh.replace("候選框", "")
+        .replace(" SVD 核定區", "")
+        .replace("SVD核定區", "")
+        .strip()
+    )
+
+
+def _plot_velocity_context_zh(velocity_context_zh: str) -> str:
+    """將固定深度圖面中的速度層位改成全中文且容易判讀的文字。
+
+    科學 run metadata 仍可使用既有的「固定深度 -5 m 流」格式供程式追溯；圖面則把
+    負號深度轉成「固定深度 5 公尺流」，直接說明距基準面向下的距離，並移除英文單位
+    符號。表層或其他已是中文的層位文字保持原樣，避免 renderer 擅自改變未知語意。
+    """
+
+    return (
+        velocity_context_zh.replace("固定深度 -", "固定深度 ")
+        .replace(" m 流", " 公尺流")
+        .strip()
     )
 
 
@@ -680,8 +716,13 @@ def load_analysis_config(
     # 重繪器的科學設定雜湊，因此切換不會重新求解 SVD。
     figure_style = figure_config.get("style", ACADEMIC_REPORT_READY_V6)
     _require(
-        figure_style in {ACADEMIC_REPORT_READY_V6, ACADEMIC_REPORT_READY_V7, ACADEMIC_REPORT_READY_V8},
-        "figures.style 只允許 academic_report_ready_v6、academic_report_ready_v7 或 academic_report_ready_v8，以確保獨立向量比例尺、明確邊界、可讀刻度與版本化岸線",
+        figure_style in {
+            ACADEMIC_REPORT_READY_V6,
+            ACADEMIC_REPORT_READY_V7,
+            ACADEMIC_REPORT_READY_V8,
+            ACADEMIC_REPORT_READY_V9,
+        },
+        "figures.style 只允許 academic_report_ready_v6、academic_report_ready_v7、academic_report_ready_v8 或 academic_report_ready_v9，以確保獨立向量比例尺、明確邊界、可讀刻度與版本化岸線",
     )
     figure_formats_raw = figure_config.get("output_formats", ["png"])
     if not isinstance(figure_formats_raw, list) or not figure_formats_raw:
@@ -1640,15 +1681,16 @@ def _make_figures(
     圖面遵循海洋流場 SVD 文獻常見結構：空間模態以 eta 物理回歸幅度作底色、u/v 回歸
     向量疊圖，並為每個模態另輸出標準化 PC 時序；解釋變異另外輸出 scree/cumulative
     圖。正式 `academic_report_ready_v6`、`academic_report_ready_v7` 與
-    `academic_report_ready_v8` 都只在 `figures/report/` 產生白底、完整中文
-    解釋變異量、明確經緯度與色階上下限、圖例及版本化高解析海岸線；每張空間圖的
+    `academic_report_ready_v8` 都只在 `figures/report/` 產生白底、以中文為主並保留
+    SVD、PC 與科學單位慣例的解釋變異量、明確經緯度與色階上下限、圖例及版本化高解析海岸線；每張空間圖的
     向量參考尺另存成同 stem 的 `_vector_scale_transparent` 全透明後製素材；另輸出
     `_with_vector_scale` 完整備用圖，把參考尺直接畫在主圖右下角。不提供白底獨立
     比例尺、無文字主圖圖層，也不顯示容易被誤認為測站的 SVD 正負號 anchor。
 
     `velocity_context_zh` 只改變圖面與指南對速度層位的文字，例如固定深度管線會傳入
-    「固定深度 -5 m 流」；`eta` 仍維持唯一自由水面高度。檔名與 metadata key 亦可由
-    呼叫端分開指定，避免固定深度成果被誤標為表層平均流。
+    「固定深度 -5 m 流」，renderer 再於公開圖面顯示為「固定深度 5 公尺流」；`eta`
+    仍維持唯一自由水面高度。檔名與 metadata key 亦可由呼叫端分開指定，避免固定深度
+    成果被誤標為表層平均流。
 
     PC 遇到來源缺日會斷線，不能用直線跨越沒有資料的時段。PNG 供快速預覽，SVG 保留箭頭
     與曲線向量結構。主圖固定輸出不透明白底；只有檔名明示 `_transparent` 的參考尺
@@ -1691,6 +1733,12 @@ def _make_figures(
     # 正式圖的刻度密度由已版本化的 layout 集中控制。這是在產圖前一次決定的純顯示參數，
     # 所有平均場與模態圖共用，不能隨個別流場數值變動而造成六區報告版面不一致。
     report_layout = _academic_report_layout(config.figure_style, config.years)
+    # 設定全名保留 AOI 審查狀態以供 metadata 與限制文字追溯；圖表標題則只使用海域名，
+    # 避免把「候選框」或「SVD 核定區」呈現為可被脫離上下文解讀的成果主張。
+    plot_focus_name_zh = _plot_focus_name_zh(config.focus_name_zh)
+    # metadata 的層位字串可保留既有格式供追溯；公開圖面將深度說明中文化，SVD、PC 與
+    # m/s、UTC、°E／°N 則保留研究圖表慣用寫法，兼顧易讀性與科學辨識度。
+    plot_velocity_context_zh = _plot_velocity_context_zh(velocity_context_zh)
     longitude_ticks = np.linspace(plot_lon_min, plot_lon_max, report_layout.map_axis_tick_count)
     latitude_ticks = np.linspace(plot_lat_min, plot_lat_max, report_layout.map_axis_tick_count)
     asset_metadata: dict[str, Any] = {"modes": []}
@@ -1945,8 +1993,8 @@ def _make_figures(
     ) -> tuple[list[str], list[str], list[str]]:
         """建立標準主圖、透明獨立參考尺，以及內嵌參考尺備用主圖。
 
-        `color_field` 對平均圖是平均 eta（m），對模態圖則是每 1 個標準化 PC 的 eta 回歸
-        幅度（m/PC 1σ）；u/v 向量使用相同語意。岸線只作視覺地理參照，來源檔與 SHA-256
+        `color_field` 對平均圖是平均海面高度，對模態圖則是每 1 個標準差的海面高度回歸
+        幅度；u/v 向量使用相同語意。岸線只作視覺地理參照，來源檔與 SHA-256
         寫入 sidecar；它不會把 OSM polygon 轉成 SVD analysis mask。主圖不疊向量比例尺，
         標準主圖不疊參考尺，方便後製；`_vector_scale_transparent` 是完全透明背景的
         純黑獨立素材。`_with_vector_scale` 則把同一個 q95 參考量直接畫在主圖右下角，
@@ -2076,10 +2124,10 @@ def _make_figures(
         color_limits=mean_color_limits,
         vector_reference=mean_vector_reference,
         quiver_scale=mean_quiver_scale,
-        title=f"{config.focus_name_zh}：{_configured_year_label(config)} 全部可得樣本平均{velocity_context_zh}與海面高度",
+        title=f"{plot_focus_name_zh}：{_configured_year_label(config)} 年全部可得樣本平均{plot_velocity_context_zh}與海面高度",
         colorbar_label="平均海面高度 η（m）",
-        # 比例尺獨立圖使用純文字 `m/s` 而不啟動 Matplotlib mathtext parser；後者在
-        # 六區平行重繪時可能競爭共用 parser cache，且部分本機 CJK 字型缺少上標負號。
+        # 比例尺保留海洋流場慣用的 m/s 單位；這段文字不啟動 Matplotlib mathtext parser，
+        # 避免 CJK 字型與上標符號在平行重繪時互相影響。
         vector_unit_label="m/s",
     )
     asset_metadata[mean_asset_key] = {
@@ -2146,7 +2194,7 @@ def _make_figures(
         # 同一份海面高度 η 時，被誤讀成四張完全相同的表層分析。這個字串只改圖面
         # 說明，不會改動回歸場、向量比例尺或任何 SVD 數值。
         velocity_title_context = (
-            "" if velocity_context_zh == "海表流" else f"（{velocity_context_zh}）"
+            "" if plot_velocity_context_zh == "海表流" else f"（{plot_velocity_context_zh}）"
         )
         (
             report_spatial_paths,
@@ -2162,7 +2210,7 @@ def _make_figures(
             vector_reference=vector_reference,
             quiver_scale=quiver_scale,
             title=(
-                f"{config.focus_name_zh}{velocity_title_context}：SVD 模態 {mode_number}"
+                f"{plot_focus_name_zh}{velocity_title_context}：奇異值分解 SVD 模態 {mode_number}"
                 f"（解釋變異量：{explained_percent:.2f}%）"
             ),
             colorbar_label="η 回歸幅度（m / PC 1σ）",
@@ -2196,14 +2244,14 @@ def _make_figures(
         axis.set_ylim(-pc_limit * 1.04, pc_limit * 1.04)
         axis.set_title(
             (
-                f"{config.focus_name_zh}：模態 {mode_number} 標準化 PC"
+                f"{plot_focus_name_zh}：模態 {mode_number} 標準化主成分時間係數 PC"
                 f"（解釋變異量：{explained_percent:.2f}%）"
             ),
             fontsize=15,
             pad=12,
         )
         axis.set_xlabel(f"{_configured_year_label(config)} 年月份（UTC）", fontsize=11)
-        axis.set_ylabel("標準化 PC（σ）", fontsize=11)
+        axis.set_ylabel("標準化主成分時間係數 PC（σ）", fontsize=11)
         # MonthLocator 的月份由版本化 layout 顯式決定。v8 仍列出每一個月，只將完整
         # `YYYY-MM` 以指定方向直式橫寫；因此不會像季刻度一樣隱藏月份，也不抽稀逐時
         # PC、日平均或缺測斷線。v7 則保留其已發布的 1/4/7/10 月刻度以供重現。
@@ -2221,7 +2269,7 @@ def _make_figures(
         # PC 值、時間軸或任何 SVD 計算結果。
         axis.legend(
             handles=[
-                Line2D([0], [0], color="#8A8A8A", linewidth=1.0, alpha=0.55, label="逐時 PC"),
+                Line2D([0], [0], color="#8A8A8A", linewidth=1.0, alpha=0.55, label="逐時主成分時間係數 PC"),
                 Line2D([0], [0], color="black", linewidth=1.4, label="逐日平均"),
                 Line2D([0], [0], color="white", linewidth=0, label="缺測處斷線"),
             ],
@@ -2300,7 +2348,7 @@ def _make_figures(
             fontsize=9,
             color="#202020",
         )
-    axis.set_title(f"{config.focus_name_zh}：SVD 模態解釋變異", fontsize=15, pad=12)
+    axis.set_title(f"{plot_focus_name_zh}：奇異值分解 SVD 模態解釋變異", fontsize=15, pad=12)
     axis.set_xlabel("模態編號", fontsize=11)
     axis.set_ylabel("解釋變異（%）", fontsize=11)
     axis.set_xlim(0.35, float(mode_numbers[-1]) + 0.65)
@@ -2405,10 +2453,12 @@ def _make_figures(
 
     plot_metadata = {
         "schema_name": "ocm_svd_academic_report_ready_figure_assets",
-        # 8.0.0 恢復跨年度逐月 PC，並指定完整年月的直式橫寫方向；這些版面策略會完整
-        # 寫入 sidecar，避免以相同 style 名稱混用不同可讀性規格。
+        # v8/v9 恢復跨年度逐月 PC，並指定完整年月的直式橫寫方向；這些版面策略會完整
+        # 寫入 sidecar，且 v9 另記錄本次圖面文字契約，避免不同版本混用。
         "schema_version": (
-            "8.0.0"
+            "9.0.0"
+            if config.figure_style == ACADEMIC_REPORT_READY_V9
+            else "8.0.0"
             if config.figure_style == ACADEMIC_REPORT_READY_V8
             else "7.0.0"
             if config.figure_style == ACADEMIC_REPORT_READY_V7
@@ -2483,9 +2533,9 @@ def _make_figures(
             "pc_tick_label_font_size": report_layout.pc_tick_label_size,
             "pc_tick_rotation_degrees": report_layout.pc_tick_rotation_degrees,
             "pc_tick_policy": (
-                "v8 在跨兩年以上時間窗保留全部逐月 YYYY-MM，並以 270° 直式橫寫、"
+                "v9/v8 在跨兩年以上時間窗保留全部逐月 YYYY-MM，並以 270° 直式橫寫、"
                 "8.5 pt 字級與較高畫布避免標籤重疊；單一年同樣逐月但使用 MM。"
-                if config.figure_style == ACADEMIC_REPORT_READY_V8
+                if config.figure_style in {ACADEMIC_REPORT_READY_V8, ACADEMIC_REPORT_READY_V9}
                 else
                 "v7 在跨兩年以上時間窗使用 1、4、7、10 月的 YYYY-MM 季刻度；"
                 "單一年保留每月 MM，僅降低標籤字級。"

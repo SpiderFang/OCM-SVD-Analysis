@@ -466,6 +466,10 @@ $SVD_OUTPUT_ROOT/
 來源科學 run 不新增 `figures/`、不改 metadata，也不複製科學陣列。若要改 DPI、輸出
 格式或 mode count，可另外提供一份已升版的完整設定：
 
+本次圖面文字契約升版為 `academic_report_ready_v9`：沿用 v8 的版面與月份刻度，更新
+海域名稱、奇異值分解／SVD、主成分時間係數／PC、coverage 說明與圖例文字。v9 是新的
+不可覆寫 figure bundle 版本，舊 v6/v7/v8 圖包仍保留供追溯與比較。
+
 ```bash
 uv run ocm-svd-replot \
   --run-dir "$SVD_OUTPUT_ROOT/svd/<既有-run-id>" \

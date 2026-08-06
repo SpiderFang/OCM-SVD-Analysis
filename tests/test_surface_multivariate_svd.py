@@ -29,7 +29,10 @@ from ocm_svd_analysis.surface_multivariate_svd import (  # noqa: E402
     ACADEMIC_REPORT_READY_V6,
     ACADEMIC_REPORT_READY_V7,
     ACADEMIC_REPORT_READY_V8,
+    ACADEMIC_REPORT_READY_V9,
     _academic_report_layout,
+    _plot_focus_name_zh,
+    _plot_velocity_context_zh,
     load_analysis_config,
     run_surface_multivariate_svd,
 )
@@ -223,6 +226,16 @@ def make_surface_cache(
 class SurfaceMultivariateSvdTest(unittest.TestCase):
     """確認 SVD 數值輸出遵守三變數、遮罩與可追溯性契約。"""
 
+    def test_plot_focus_name_hides_aoi_review_labels(self) -> None:
+        """圖面名稱只保留海域名，設定內的 AOI 審查資訊不得出現在標題。"""
+
+        self.assertEqual(_plot_focus_name_zh("貢寮海域候選框"), "貢寮海域")
+        self.assertEqual(_plot_focus_name_zh("北竿海域 SVD 核定區"), "北竿海域")
+        self.assertEqual(_plot_focus_name_zh("北竿海域SVD核定區"), "北竿海域")
+        self.assertEqual(_plot_focus_name_zh("南竿海域"), "南竿海域")
+        self.assertEqual(_plot_velocity_context_zh("固定深度 -5 m 流"), "固定深度 5 公尺流")
+        self.assertEqual(_plot_velocity_context_zh("共同遮罩表層流"), "共同遮罩表層流")
+
     def test_v8_report_layout_keeps_monthly_pc_ticks_with_vertical_horizontal_writing(self) -> None:
         """v8 必須保留每月 PC 標示且消除年月重疊風險。
 
@@ -247,6 +260,9 @@ class SurfaceMultivariateSvdTest(unittest.TestCase):
         self.assertEqual(v8_single_year.pc_date_format, "%m")
         self.assertEqual(v8_single_year.pc_tick_rotation_degrees, 270.0)
 
+        v9_multiyear = _academic_report_layout(ACADEMIC_REPORT_READY_V9, (2024, 2025))
+        self.assertEqual(v9_multiyear, v8_multiyear)
+
         v7_multiyear = _academic_report_layout(ACADEMIC_REPORT_READY_V7, (2024, 2025))
         self.assertEqual(v7_multiyear.pc_major_tick_months, (1, 4, 7, 10))
         self.assertEqual(v7_multiyear.pc_tick_rotation_degrees, 0.0)
@@ -260,6 +276,9 @@ class SurfaceMultivariateSvdTest(unittest.TestCase):
             config_path = root / "v8_config.json"
             make_config(config_path, figure_style=ACADEMIC_REPORT_READY_V8)
             self.assertEqual(load_analysis_config(config_path).figure_style, ACADEMIC_REPORT_READY_V8)
+            v9_config_path = root / "v9_config.json"
+            make_config(v9_config_path, figure_style=ACADEMIC_REPORT_READY_V9)
+            self.assertEqual(load_analysis_config(v9_config_path).figure_style, ACADEMIC_REPORT_READY_V9)
 
     def test_run_writes_expected_arrays_and_records_short_gap_interpolation(self) -> None:
         """一個短 u 缺值應聯合插補三分量且不縮短兩月共 48 個可用時間樣本。"""
@@ -399,8 +418,10 @@ class SurfaceMultivariateSvdTest(unittest.TestCase):
             ).read_text(encoding="utf-8")
             self.assertNotIn(forbidden_alias, report_guide)
             self.assertNotIn(forbidden_alias, report_svg)
-            self.assertIn("SVD 模態 1", report_svg)
+            self.assertIn("奇異值分解 SVD 模態 1", report_svg)
             self.assertIn("解釋變異量", report_svg)
+            self.assertIn("經度（°E）", report_svg)
+            self.assertIn("緯度（°N）", report_svg)
             self.assertNotIn("EV=", report_svg)
             self.assertNotIn("focus anchor", report_svg.lower())
             self.assertIn("#d9d6cf", report_svg.lower())
@@ -444,9 +465,10 @@ class SurfaceMultivariateSvdTest(unittest.TestCase):
             right_padding = int(transparent_alpha.shape[1] - 1 - nonzero_columns.max())
             top_padding = int(nonzero_rows.min())
             bottom_padding = int(transparent_alpha.shape[0] - 1 - nonzero_rows.max())
-            # artist bbox 四周使用同一個 inch padding；容許 2 px 是因 PNG antialiasing
-            # 與浮點 bbox 轉整數像素時可能各自向內／向外取整一個像素。
-            self.assertLessEqual(abs(left_padding - right_padding), 2)
+            # artist bbox 四周使用同一個 inch padding；中文單位字型的反鋸齒邊界，加上
+            # 浮點 bbox 轉整數像素時的取整，左右最多容許 4 px；上下仍維持 2 px，避免
+            # 透明素材出現肉眼可見的不對稱留白。
+            self.assertLessEqual(abs(left_padding - right_padding), 4)
             self.assertLessEqual(abs(top_padding - bottom_padding), 2)
             with_vector_scale_image = mpimg.imread(
                 result_dir
@@ -456,15 +478,15 @@ class SurfaceMultivariateSvdTest(unittest.TestCase):
             )
             if with_vector_scale_image.ndim == 3 and with_vector_scale_image.shape[2] == 4:
                 self.assertTrue(np.allclose(with_vector_scale_image[:, :, 3], 1.0))
-            # 緊密裁切後的透明素材應落在主圖寬度 10–18%、高度不超過 4%；下限防止
-            # 文字被誤裁，上限防止回到 601×154 且左右大量留白的舊版素材。
+            # 緊密裁切後的透明素材應落在主圖寬度 10–21%、高度不超過 4%；中文單位
+            # 標籤比舊版英文縮寫自然較寬，因此放寬上限但仍防止回到 601×154 的舊版留白。
             self.assertGreaterEqual(
                 vector_scale_transparent_image.shape[1] / report_image.shape[1],
                 0.10,
             )
             self.assertLessEqual(
                 vector_scale_transparent_image.shape[1] / report_image.shape[1],
-                0.18,
+                0.21,
             )
             self.assertLessEqual(
                 vector_scale_transparent_image.shape[0] / report_image.shape[0],

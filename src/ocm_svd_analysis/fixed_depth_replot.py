@@ -45,6 +45,8 @@ from .surface_multivariate_svd import (
     _clip_land_polygons_to_extent,
     _load_geojson_land_polygons,
     _make_figures,
+    _plot_focus_name_zh,
+    _plot_velocity_context_zh,
     _read_json_object,
     _require,
     _resolve_report_font,
@@ -205,7 +207,7 @@ def _make_fixed_depth_coverage_qc_figure(
     level_valid_fractions: tuple[np.ndarray, ...],
     config: AnalysisConfig,
 ) -> tuple[list[str], dict[str, Any]]:
-    """建立四層年度 coverage 門檻與共同交集的 2×2 QC 地圖。
+    """建立四層年度資料有效覆蓋情形與共同有效範圍的 2×2 地圖。
 
     藍色格代表該層三變數年度有效率達 `minimum_cell_valid_fraction`；橙色格仍位於原始
     analysis geometry，但該層未達門檻。陸地只由版本化 OSM polygon 疊加作地理參照，
@@ -263,7 +265,7 @@ def _make_fixed_depth_coverage_qc_figure(
     )
 
     def add_land_overlay(axis: Any) -> None:
-        """在每個分面上疊相同 OSM 陸地，維持 coverage 分類的海陸地理語意。"""
+        """在每個分面上疊相同的底圖陸地，維持有效覆蓋分類的海陸地理語意。"""
 
         for polygon in plot_land_polygons:
             vertices: list[np.ndarray] = []
@@ -295,6 +297,8 @@ def _make_fixed_depth_coverage_qc_figure(
     threshold = config.minimum_cell_valid_fraction
     panel_metadata: list[dict[str, Any]] = []
 
+    # 公開圖面只呈現海域名稱與資料有效覆蓋情形；AOI 核定狀態仍由來源 run metadata 保存。
+    plot_focus_name_zh = _plot_focus_name_zh(config.focus_name_zh)
     fig, axes = plt.subplots(2, 2, figsize=(10.5, 10.0), sharex=True, sharey=True)
     for axis, level_id, label, valid_fraction in zip(
         axes.flat,
@@ -322,7 +326,7 @@ def _make_fixed_depth_coverage_qc_figure(
         pass_count = int(np.count_nonzero(pass_mask))
         fail_count = geometry_count - pass_count
         axis.set_title(
-            f"{label}：達標 {pass_count}/{geometry_count} 格",
+            f"{_plot_velocity_context_zh(label)}：符合資料門檻 {pass_count}/{geometry_count} 格",
             fontsize=12,
             pad=10,
         )
@@ -353,7 +357,7 @@ def _make_fixed_depth_coverage_qc_figure(
     for axis in axes[-1, :]:
         axis.set_xlabel("經度（°E）", fontsize=10)
     fig.suptitle(
-        f"{config.focus_name_zh}：固定深度四層 coverage QC（年度有效率門檻 ≥ {threshold:.0%}）",
+        f"{plot_focus_name_zh}：固定深度四層資料有效覆蓋情形（年度有效率門檻 ≥ {threshold:.0%}）",
         fontsize=16,
         y=0.985,
     )
@@ -361,7 +365,7 @@ def _make_fixed_depth_coverage_qc_figure(
     fig.text(
         0.5,
         0.925,
-        f"四層共同交集：{shared_count}/{geometry_count} 格；共同排除 {excluded_count} 格",
+        f"四層皆符合門檻的共同有效海域：{shared_count}/{geometry_count} 格；未納入共同分析 {excluded_count} 格",
         ha="center",
         va="center",
         fontsize=11,
@@ -370,7 +374,7 @@ def _make_fixed_depth_coverage_qc_figure(
         handles=[
             Patch(facecolor="#2A6F97", edgecolor="none", label="該層年度有效率達標"),
             Patch(facecolor="#D89032", edgecolor="none", label="該層年度有效率未達門檻"),
-            Patch(facecolor="#D9D6CF", edgecolor="#4A4A4A", label="OSM 陸地"),
+            Patch(facecolor="#D9D6CF", edgecolor="#4A4A4A", label="底圖陸地範圍"),
             Line2D([], [], color="none", label="共同遮罩採四層交集，不補值、不外插"),
         ],
         loc="lower center",

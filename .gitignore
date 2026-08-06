@@ -20,3 +20,4 @@ work/
 # bash 腳本每次執行的 JSON runtime log；它們記錄主機、參數與實際成果，屬於當次作業
 # 證據而非可重現原始碼，不應混入版本控制。
 logs/
+docs/figures/

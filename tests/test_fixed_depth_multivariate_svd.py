@@ -22,6 +22,7 @@ from ocm_svd_analysis.fixed_depth_batch import (
 from ocm_svd_analysis.fixed_depth_replot import (
     replot_fixed_depth_multivariate_svd,
 )
+from ocm_svd_analysis.surface_multivariate_svd import _plot_velocity_context_zh
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -734,6 +735,18 @@ class FixedDepthMultivariateSvdTest(unittest.TestCase):
                     / "fixed_depth_shared_coverage_qc_report.png"
                 ).is_file()
             )
+            coverage_svg = (
+                bundle
+                / "figures"
+                / "report"
+                / "fixed_depth_shared_coverage_qc_report.svg"
+            ).read_text(encoding="utf-8")
+            self.assertIn("資料有效覆蓋情形", coverage_svg)
+            self.assertIn("共同有效海域", coverage_svg)
+            self.assertIn("經度（°E）", coverage_svg)
+            self.assertIn("緯度（°N）", coverage_svg)
+            self.assertNotIn("coverage QC", coverage_svg)
+            self.assertNotIn("OSM 陸地", coverage_svg)
             for level in metadata["levels"]:
                 report_dir = (
                     bundle
@@ -764,7 +777,10 @@ class FixedDepthMultivariateSvdTest(unittest.TestCase):
                 spatial_svg = (
                     report_dir / "svd_mode_01_spatial_report_with_vector_scale.svg"
                 ).read_text(encoding="utf-8")
-                self.assertIn(level["velocity_context_zh"], spatial_svg)
+                self.assertIn(
+                    _plot_velocity_context_zh(level["velocity_context_zh"]),
+                    spatial_svg,
+                )
             self.assertEqual(
                 hashlib.sha256(source_metadata_path.read_bytes()).hexdigest(),
                 source_metadata_sha256,
