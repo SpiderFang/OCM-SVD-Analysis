@@ -1,0 +1,75 @@
+{
+  "schema_version": "1.0.0",
+  "analysis_kind": "water_column_multivariate_svd",
+  "analysis_label": "houwan_nmmba_flow_domain_surface_z010_020_030_040_050_u_v_eta_available_2024_2025_v1",
+  "purpose": "後灣／海生館完整 flow domain 的 2024–2025 全部可得資料正式 run：以既有表層 u/v、固定水下 10、20、30、40、50 m 的 u/v，以及一次且僅一次的 eta，組成主持人要求的 A=(feature,time) 聯合資料矩陣，直接求取設定的 100 個 SVD 模態；圖面預設發布前 20 個模態，後續可由同一成果唯讀重繪第 21–30 或其它已計算模態。各深度不得各自分解；eta 不具垂向層，禁止重複至六個速度深度。來源缺日不插補，NaN 不以 0 取代；若完整 dense SVD 的保守 RAM 需求過高，改用同一磁碟矩陣的 PROPACK 直接求解設定模態數，並發布殘差驗證。",
+  "domain": {
+    "flow_domain_id": "houwan_nmmba_cache_v3",
+    "name_zh": "後灣／海生館單區域 flow cache",
+    "bbox_lon_lat": [120.16671, 121.62, 21.550844, 22.449156],
+    "bbox_order": "lon_min, lon_max, lat_min, lat_max",
+    "center_lonlat": [120.893355, 22.0],
+    "source_flow_domains_config": "OCM-Data-Preprocessing/configs/ocm_flow_domains.json",
+    "source_flow_domains_config_sha256": "b8db61c38138d5690d203bf1b3785c6b2e581572d08f097573772c554ef373b3"
+  },
+  "input": {
+    "years": [2024, 2025],
+    "months": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    "required_cache_schema_major": 3,
+    "required_status": "ready",
+    "required_cache_kinds": ["standard_month"],
+    "expected_timestep_hours": 1.0,
+    "maximum_source_gap_hours": null,
+    "time_axis_canonicalization_policy": "sort_and_deduplicate_prefer_last"
+  },
+  "vertical_sampling": {
+    "surface_velocity_source": "published_ocm_surface_u_v",
+    "fixed_depths_m_below_vertical_datum": [10.0, 20.0, 30.0, 40.0, 50.0],
+    "vertical_interpolation": "linear_between_bracketing_finite_zcor_no_extrapolation",
+    "eta_source": "published_ocm_surface_eta_m_once",
+    "vertical_quadrature_weights_m": [5.0, 10.0, 10.0, 10.0, 10.0, 5.0]
+  },
+  "mask_and_missing_data": {
+    "static_ocean_mask": "mask_static.npy",
+    "minimum_feature_valid_fraction": 0.995,
+    "minimum_retained_time_fraction": 0.9,
+    "minimum_cells_per_velocity_level": 30,
+    "minimum_eta_cells": 30,
+    "missing_value_policy": "never_fill_nan_with_zero_or_interpolate"
+  },
+  "svd": {
+    "variables": ["u_velocity_mps", "v_velocity_mps", "eta_m"],
+    "anomaly_reference": "each_retained_feature_time_mean_over_complete_available_2024_2025_samples",
+    "normalization": "u_v_share_volume_weighted_rms__eta_uses_area_weighted_rms",
+    "spatial_weight": "sqrt(cell_area_m2_times_vertical_quadrature_for_u_v__sqrt(cell_area_m2)_for_eta",
+    "solver_policy": "direct_dense_lapack_then_direct_propack_streaming",
+    "requested_mode_count": 100,
+    "minimum_reported_mode_count": 20,
+    "sign_convention": "nearest valid surface u loading to flow-domain center positive; then surface v, eta, and largest absolute loading"
+  },
+  "solver": {
+    "dense_solver": "numpy_linalg_svd_full_matrices_false",
+    "streaming_solver": "scipy_svds_propack_linear_operator",
+    "dense_memory_limit_gib": 32.0,
+    "operator_time_block_rows": 64,
+    "propack_maxiter": 20000,
+    "propack_max_attempts": 3,
+    "relative_residual_tolerance": 1e-09,
+    "random_seed": 20260806
+  },
+  "parallel_execution": {
+    "native_time_block_size": 48,
+    "native_io_workers": 12,
+    "native_block_read_strategy": "selected_nodes_fancy_index",
+    "linear_algebra_threads": 32,
+    "policy": "最多 12 個 worker 平行讀取不同月／時段的 paired native/surface block；每個 worker 每次只 materialize 48 個時間步、且只取後灣水平內插實際需要的 6,984 個 native source nodes，不讀入未使用 node。此讀法只改變 NFS I/O 量，不改變 hvel/zcor 取值、固定深度內插、遮罩、eta 或聯合 SVD 矩陣。主執行緒以唯一 canonical UTC row 寫入 raw feature 暫存。I/O 完成後才以最多 32 個 BLAS 執行緒求解 direct dense LAPACK 或 memory-map PROPACK，避免 I/O 與線性代數巢狀超額平行。"
+  },
+  "figures": {
+    "mode_count": 20,
+    "max_quiver_arrows_per_axis": 18,
+    "output_formats": ["png", "svg"],
+    "raster_dpi": 220,
+    "coastline_geojson": "OCM-Data-Preprocessing/data/coastline/osm_land_polygons_taiwan_v1.geojson",
+    "coastline_geojson_sha256": "9e2e0ac9bc527aca87d89332cd428fdcb776eefbf94a85dd70f887f729b95fdd"
+  }
+}

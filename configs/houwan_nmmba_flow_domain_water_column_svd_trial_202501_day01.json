@@ -1,0 +1,73 @@
+{
+  "schema_version": "1.0.0",
+  "analysis_kind": "water_column_multivariate_svd",
+  "analysis_label": "houwan_nmmba_flow_domain_surface_z010_020_030_040_050_u_v_eta_trial_202501_day01_v1",
+  "purpose": "僅供本機開發驗證的後灣／海生館完整 flow-domain 單日 paired trial：以已發布表層 u/v、固定水下 10、20、30、40、50 m 的 u/v，及一次且僅一次的 eta 建立同一個直接 SVD。此設定只能搭配 --allow-trial 使用，絕不代表兩年正式成果，也不可用於研究結論。",
+  "domain": {
+    "flow_domain_id": "houwan_nmmba_cache_v3",
+    "name_zh": "後灣／海生館單區域 flow cache",
+    "bbox_lon_lat": [120.16671, 121.62, 21.550844, 22.449156],
+    "bbox_order": "lon_min, lon_max, lat_min, lat_max",
+    "center_lonlat": [120.893355, 22.0],
+    "source_flow_domains_config": "OCM-Data-Preprocessing/configs/ocm_flow_domains.json",
+    "source_flow_domains_config_sha256": "b8db61c38138d5690d203bf1b3785c6b2e581572d08f097573772c554ef373b3"
+  },
+  "input": {
+    "years": [2025],
+    "months": [1],
+    "required_cache_schema_major": 3,
+    "required_status": "ready",
+    "required_cache_kinds": ["standard_month"],
+    "expected_timestep_hours": 1.0,
+    "maximum_source_gap_hours": null,
+    "time_axis_canonicalization_policy": "sort_and_deduplicate_prefer_last"
+  },
+  "vertical_sampling": {
+    "surface_velocity_source": "published_ocm_surface_u_v",
+    "fixed_depths_m_below_vertical_datum": [10.0, 20.0, 30.0, 40.0, 50.0],
+    "vertical_interpolation": "linear_between_bracketing_finite_zcor_no_extrapolation",
+    "eta_source": "published_ocm_surface_eta_m_once",
+    "vertical_quadrature_weights_m": [5.0, 10.0, 10.0, 10.0, 10.0, 5.0]
+  },
+  "mask_and_missing_data": {
+    "static_ocean_mask": "mask_static.npy",
+    "minimum_feature_valid_fraction": 0.95,
+    "minimum_retained_time_fraction": 0.9,
+    "minimum_cells_per_velocity_level": 30,
+    "minimum_eta_cells": 30,
+    "missing_value_policy": "never_fill_nan_with_zero_or_interpolate"
+  },
+  "svd": {
+    "variables": ["u_velocity_mps", "v_velocity_mps", "eta_m"],
+    "anomaly_reference": "each_retained_feature_time_mean_over_trial_day_samples",
+    "normalization": "u_v_share_volume_weighted_rms__eta_uses_area_weighted_rms",
+    "spatial_weight": "sqrt(cell_area_m2_times_vertical_quadrature_for_u_v__sqrt(cell_area_m2)_for_eta",
+    "solver_policy": "direct_dense_lapack_then_direct_propack_streaming",
+    "requested_mode_count": 20,
+    "minimum_reported_mode_count": 20,
+    "sign_convention": "nearest valid surface u loading to flow-domain center positive; then surface v, eta, and largest absolute loading"
+  },
+  "solver": {
+    "dense_solver": "numpy_linalg_svd_full_matrices_false",
+    "streaming_solver": "scipy_svds_propack_linear_operator",
+    "dense_memory_limit_gib": 1.0,
+    "operator_time_block_rows": 24,
+    "propack_maxiter": 20000,
+    "propack_max_attempts": 3,
+    "relative_residual_tolerance": 1e-09,
+    "random_seed": 20260806
+  },
+  "parallel_execution": {
+    "native_time_block_size": 12,
+    "native_io_workers": 2,
+    "native_block_read_strategy": "selected_nodes_fancy_index",
+    "linear_algebra_threads": 4,
+    "policy": "單日試跑每次只 materialize 12 個時間步且只取水平內插實際需要的 native nodes；目的在驗證 paired I/O、垂向內插、聯合矩陣與直接 SVD 路徑，非產生科學結果。"
+  },
+  "figures": {
+    "mode_count": 20,
+    "max_quiver_arrows_per_axis": 18,
+    "output_formats": ["png"],
+    "raster_dpi": 160
+  }
+}

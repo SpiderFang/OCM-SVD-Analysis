@@ -1,13 +1,14 @@
 # SVD 結果圖表文獻追溯紀錄
 
-本文件記錄 `academic_report_ready_v6` 圖表設計實際查閱的學術來源，供成果報告、
+本文件記錄 `academic_report_ready_v6`–`v9` 與水柱獨立圖面版本
+`academic_report_ready_water_column_independent_v1` 實際查閱的學術來源，供成果報告、
 論文撰寫、圖說製作與日後修改程式時逐項核對。這裡只把來源中可直接支持的畫法列為
 「文獻慣例」；白底完整標示、資料缺口斷線等本專案需求則另外標示，避免把工程決策
 錯誤歸因於原始論文。
 
-- 查閱日期：2026-07-30
+- 查閱日期：2026-08-07
 - 查閱範圍：期刊官方全文頁面、方法段落、圖說與官方 PDF
-- 對應程式版本：`academic_report_ready_v6`
+- 對應程式版本：表層 `academic_report_ready_v9`；水柱 `academic_report_ready_water_column_independent_v1`
 - BibTeX：[`svd_figure_references.bib`](svd_figure_references.bib)
 
 ## 來源一：海表流 SVD 的空間向量與時間模態
@@ -123,11 +124,43 @@ https://doi.org/10.5194/os-18-1741-2022
 | 白底完整標題、單位、色條與圖例 | 無直接照搬來源 | 本專案可解讀性與報告交付決策 |
 | 標題寫完整「解釋變異量」而不只用 EV 縮寫 | 無直接照搬來源 | 本專案非專業讀者可讀性決策 |
 | 經緯度軸與色條把實際上下限列為首尾刻度 | 無直接照搬來源 | 本專案數值邊界稽核決策 |
-| 標準主圖不預先疊入向量參考尺；另存同 stem `_vector_scale_transparent` 全透明緊密裁切素材及 `_with_vector_scale` 備用完整圖 | 文獻中的向量比例概念；右下角 axes-fraction quiverkey 版面參考相鄰 `OCM-NetCDF-Visualizer`、`OCM-Data-Preprocessing` | 本專案後製交付決策；兩版直接沿用主圖 quiver scale，不編碼額外資料 |
+| 每張水柱速度主圖左下角直接嵌入向量參考尺；另存同 stem `_vector_scale_transparent` 全透明緊密裁切素材 | 文獻中的向量比例概念；axes-fraction quiverkey 版面參考相鄰 `OCM-NetCDF-Visualizer`、`OCM-Data-Preprocessing` | 本專案後製交付決策；主圖與透明素材均直接沿用同一 quiver scale，不編碼額外資料 |
 | 暖灰向量陸地與深灰高解析海岸線疊於海洋資料場上方 | 海洋空間圖共通地理參照方式；岸線來源另依本專案圖資紀錄 | 本專案學術地圖決策 |
 | 不在正式圖顯示 SVD 正負號 anchor | 無直接照搬來源 | 避免被誤認為測站的報告決策 |
 | PNG、SVG 與外部 `plot_metadata.json` | 無直接照搬來源 | 本專案報告與 provenance 決策 |
 | 裁到有效 cell edge、排除邊界裁切箭頭 | 無直接照搬來源 | 本專案繪圖品質決策 |
+
+## 水柱聯合 SVD 的獨立深度圖面補充
+
+本節針對水柱聯合狀態向量的圖面需求，補記本次提供的五項參考。核心原則是「數值上
+聯合、圖面上拆分」：六層 `u/v`、唯一一次的 `eta` 與共同 PC 仍來自同一個 SVD，
+但每個深度的空間圖、eta 空間圖與 PC 時序均保存為獨立檔案。這不是把資料改成六次
+分層 SVD，而是把同一模態的不同物理視角拆成可後製排版的資產。
+
+### 本次參考來源與實際套用
+
+1. [EOF/PC 分析示意圖（ResearchGate）](https://www.researchgate.net/figure/Schematic-of-the-empirical-orthogonal-function-EOF-principal-component-PC-analysis_fig3_372347799)：作為結構示意，支持每個模態同時具有空間型態與 PC 時序的配對概念。此頁是示意圖來源，不作主要方法論或數值公式的唯一依據。
+2. [Buongiorno Nardelli, Mulet, and Iudicone (2018), JGR Oceans](https://agupubs.onlinelibrary.wiley.com/doi/10.1002/2017JC013316)：提供三維海洋運動與垂向交換的物理脈絡；本專案因此保留深度資訊的獨立閱讀視角，但不把每個深度改成另一個 SVD 問題。
+3. [Hong et al. (2025), Remote Sensing 17(8), 1468](https://www.mdpi.com/2072-4292/17/8/1468)：以 physical modes 與遙測資料重建三維海洋狀態；本專案沿用「同一組模態係數配對不同垂向場」的可解讀方向，並將各層輸出成獨立地圖。
+4. [Constantinou and Hogg, *Intrinsic oceanic decadal variability of upper-ocean heat content*](https://arxiv.org/pdf/2012.08025)：作為海洋變異之空間型態與時間尺度分解的背景參考；本專案將 PC 時序獨立保存，避免被壓縮在多層空間 panel 中。
+5. [Lee et al. (2013), *The mesoscale eddies and Kuroshio transport in the western North Pacific east of Taiwan from 8-year (2003–2010) model reanalysis*](https://link.springer.com/article/10.1007/s10236-013-0643-z)：與本案最直接相關；其結果將 EOF spatial amplitudes 與 PCs 分開呈現，並以水平流場／動力高度與垂向剖面分側檢視三維結構。本案據此把表層、10、20、30、40、50 m 六張速度圖各自交付，另交付唯一 eta 圖與同 mode PC 圖。
+
+### 水柱圖面的強制規範
+
+| 水柱圖面規範 | 科學意義或文獻脈絡 | 本專案交付實作 |
+|---|---|---|
+| 每個 mode 的六層速度各自一張 | 深度結構需能逐層比較，避免不同層在同一小圖內互相遮蔽 | `water_column_mode_XX_<level>_spatial_report` |
+| eta 只出現一次 | eta 是二維自由水面高度，不具垂向層；重複六次會人為放大其權重與圖面語意 | `water_column_mode_XX_eta_spatial_report`；維度固定為 `(mode, lat, lon)` |
+| PC 與空間圖以 mode index 配對 | 空間型態與時間係數是同一模態的兩個互補表示 | `water_column_mode_XX_pc_report`，不與地圖共用畫布 |
+| 同一套 SVD 共享所有深度的 mode／PC | 避免把「獨立圖檔」誤解成「各深度獨立求解」 | `mode_u/mode_v` 保留 `(mode, velocity_level, lat, lon)`，共同 `pc` 保留 `(mode, time)` |
+| 垂向視圖可獨立後製 | Springer 參考的水平／剖面分側呈現，與本案報告後製需求一致 | 不輸出 `mode_XX.png` 3×3 合併圖；每張速度主圖已具比例尺，另保存透明素材供必要的版面移位 |
+
+### 引用界線
+
+上述來源支持的是模態、時間係數、三維物理結構與水平／垂向視角的組織方式；白底、中文
+標題、逐時灰線／逐日黑線、缺測斷線、固定五點色條、透明比例尺及檔名 schema 均是本專案
+為報告後製與品質稽核所訂的工程交付規範。圖面不可據此單獨宣稱因果關係，也不可把一張
+獨立深度圖解讀成該深度單獨解出的統計模態。
 
 ## 後續引用建議
 
@@ -136,7 +169,9 @@ https://doi.org/10.5194/os-18-1741-2022
 1. 描述 SVD 空間場與 PC 配對時，引用 Song et al. (2025)。
 2. 描述流速 SVD 空間箭頭抽稀與時間模態分開呈現時，引用 de Oliveira Júnior et al. (2022)。
 3. 描述標準化 PC、回歸幅度及「每一個 PC 標準差」的物理單位時，引用 Volkov et al. (2022)。
-4. 「白底完整標示、逐日黑線、缺口斷線」應寫成本研究的製圖與品質控制設定，不應標為
+4. 描述水柱深度結構分圖、水平／垂向視角與共同 PC 的配對時，可引用 Lee et al. (2013)，
+   並同時說明本研究的「每層獨立檔案」是為報告後製所作的交付決策。
+5. 「白底完整標示、逐日黑線、缺口斷線」應寫成本研究的製圖與品質控制設定，不應標為
    上述論文提出的方法。
 
 ## 岸線圖資來源

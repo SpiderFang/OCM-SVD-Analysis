@@ -1,14 +1,223 @@
 # OCM SVD Analysis
 
-本專案延續 `OCM-Data-Preprocessing` 已驗收的 `ocm_surface` `.npy` flow-domain 快取，
-建立可重跑的表層流場 SVD 成果。前處理專案是「六個分析區域、候選框脈絡、遮罩與
-provenance」的唯一權威；本專案只依其版本化定義讀取資料、做 SVD 與輸出衍生結果。
-程式絕不讀取原始 SCHISM NetCDF、不重複前處理或複製 flow cache，也不會把缺值、陸地或
-無效流速填成 0。
+本專案延續 `OCM-Data-Preprocessing` 已驗收的 `ocm_surface` 與 paired `ocm_native`
+`.npy` flow-domain 快取，建立可重跑的流場 SVD 成果。前處理專案是「flow domain、候選
+框脈絡、遮罩與 provenance」的唯一權威；本專案只依其版本化定義讀取資料、做 SVD 與輸出
+衍生結果。程式絕不讀取原始 SCHISM NetCDF、不重複前處理或複製 flow cache，也不會把缺值、
+陸地或無效流速填成 0。
 
-「SVD」是本專案所有設定、CLI、檔名、圖面與文件的固定名稱。數值上使用空間協方差
-特徵分解回復與薄型 SVD 相同的空間模態、奇異值與 PC；這是在「空間格點遠少於逐時樣本」
-時較有效率的等價 SVD 解法，不代表改做不同方法。
+「SVD」是本專案所有設定、CLI、檔名、圖面與文件的固定名稱。既有表層產品保留其歷史的
+空間協方差求解器；本次新增的後灣完整 flow-domain 水柱產品則明確使用**直接 SVD**：小型
+矩陣採 `numpy.linalg.svd`，大型矩陣採同一個加權矩陣的 PROPACK 直接奇異三元組求解。新產品
+不建立 `X.T @ X`、`X @ X.T` 或任何「由協方差回復 SVD」的結果，也不以此類等價敘述取代
+直接求解的數值證據。
+
+## 後灣完整 flow-domain：表層至 50 m 的單一聯合直接 SVD
+
+本次研究需求所述的「水深 50 m，分 10、20、30、40」在實作上固定為六個速度層：已發布的
+**表層**、固定水下 **10、20、30、40、50 m**。表層不是 native 資料中的固定 datum `z=0`；
+它直接沿用前處理已選取之 `ocm_surface` 表層 `u/v`。固定水下層則由 paired
+`ocm_native/hvel.npy` 與 `zcor.npy` 在每個時次、每個 source node 找有限的上下包夾層作線性
+內插；沒有包夾時維持 `NaN`，不向海面或海床外插。
+
+報告不需要揭露 `ocm_surface/ocm_native` 的內部資料分工；研究上可表述為：「以表層及
+固定水下 10–50 m 的流速，連同同時次的一份自由水面高度，建立一個聯合 SVD。」內部來源的
+分工只用於確保資料物理意義正確：
+
+| 研究變數 | 實作資料來源 | 進入狀態向量的次數 |
+| --- | --- | --- |
+| 表層 `u/v` | 已發布 `ocm_surface/u_surface_mps.npy`、`v_surface_mps.npy` | 各一次 |
+| 水下 10、20、30、40、50 m `u/v` | paired `ocm_native/hvel.npy`、`zcor.npy` 固定深度內插 | 每個深度的 `u/v` 各一次 |
+| 自由水面高度 `eta` | 已發布 `ocm_surface/eta_m.npy` | **全矩陣只一次** |
+
+`eta` 是二維自由水面場，沒有垂向層；因此不得在六個速度深度重複。設第 `l` 個速度層保留
+`P_l` 個格點、`P_eta` 為 eta 格點，單一時次的狀態向量依序為
+
+$$
+q(t)=[\eta,\ u_0,\ u_{10},\ u_{20},\ u_{30},\ u_{40},\ u_{50},\ v_0,\ v_{10},\ v_{20},\ v_{30},\ v_{40},\ v_{50}]^T .
+$$
+
+六個 `u/v` 層與唯一 eta 欄位會依研究需求指定排列串成**同一個** `A=(feature, time)` 加權距平矩陣，
+再依設定的模態數求同一組空間模態與共同 PC；並非每個深度各做一次 SVD。流速採
+`sqrt(cell_area × 垂向梯形權重)`（`5, 10, 10, 10, 10, 5 m`）與共用體積加權 RMS；eta 僅採
+`sqrt(cell_area)` 與面積加權 RMS，因此不會因層數被人為加權六倍。
+
+完整 flow domain 的矩陣可能超出 RAM。流程先將原始特徵寫入 float32 disk-backed 暫存，再
+建立無缺值的 float64 `A=(feature,time)` 加權矩陣；若薄型 dense SVD 的保守 RAM 估計超過設定預算，改用
+`scipy.sparse.linalg.svds(..., solver="propack")` 的 `LinearOperator` 直接對該矩陣求設定模態數
+的奇異三元組。它只做分塊 `A @ v` 與 `A.T @ u`，不建立 normal matrix；每次求解均寫出左右
+殘差、正交誤差、求解器與資源用量到 `metadata.json`。對大型 memory-map 矩陣，驗證用的獨立
+分塊乘法可能產生數個 `1e-9` 的浮點累加殘差，因此發布檢查採設定門檻與明載 `1e-8` streaming
+數值地板中的較寬者，並額外要求正交性誤差不超過 `1e-10`；設定值、有效門檻、每次嘗試與實測
+殘差全都保留在 metadata。此地板不改變 `A`、權重、變數或直接 SVD 演算法。因此 RAM 不足時會
+切換為可驗證的直接 disk-backed 方法，而不是停止、降階成協方差法或暗中改做分層 SVD。
+
+native I/O 策略必須在 `parallel_execution.native_block_read_strategy` 顯式寫出，並同步記錄於
+預檢及正式 `metadata.json`。後灣兩年正式設定採 `selected_nodes_fancy_index`：只 materialize
+水平內插所需的 6,984 個 native node，不讀取未使用的 17,463 個 node；這是以 SERVER NFS
+實測決定的吞吐最佳化。另一個可用策略 `contiguous_full_source_axis_then_select` 會先讀完整
+source-node 軸後選出子集，僅供其他 domain 在 I/O 實測較快時明確採用。兩種策略都只改變檔案
+讀取方式，不改變 `hvel/zcor` 數值、固定深度內插、有效遮罩、資料矩陣或 SVD，且不會在執行中
+暗中切換。
+
+原始 NaN 不補 0、不插補。流程會先依每個深度的實際有效率保留配對 `u/v` 欄位，再以所有保留
+欄位都有限的共同時次求解；若設定門檻造成共同時間交集過小，會收縮到全時段有限的特徵，而
+非創造資料。每層遮罩可以不同，但全部保留欄位仍屬同一個 SVD。這是「表層至 50 m 的採樣
+層聯合分析」，不宣稱每一格都完整代表連續水柱。
+
+正式設定為
+[`houwan_nmmba_flow_domain_water_column_svd_available_2024_2025.json`](configs/houwan_nmmba_flow_domain_water_column_svd_available_2024_2025.json)。
+它只涵蓋後灣／海生館完整 `houwan_nmmba_cache_v3`，目前設定先求取 100 個聯合模態，預設
+只產出前 20 個模態圖面。每個已繪製模態
+分別輸出表層、10、20、30、40、50 m 六張獨立速度空間圖、唯一 eta 空間圖與一張獨立
+標準化 PC 時序圖；另有一張獨立解釋變異圖與七張獨立 feature coverage QC 圖。正式圖面
+不再產生把多個深度塞在同一張 3×3 subplot 的 `mode_01.png` 類複合圖。完成、檢查
+metadata 與圖面後才可由研究團隊明確決定是否對其餘 flow domains 建立各自的新版本；本次
+入口不會自動擴大成四區或六區批次。
+
+### 研究需求指定排列：`eta → 全部 u → 全部 v` 的 feature×time 矩陣與回填圖場
+
+矩陣示意圖中每個時間是一個直式狀態向量，所有時間向量並排，因此正式求解器直接採用
+`A=(feature, time)`；原始時間主序檔只作為 I/O 中間格式，不是 SVD 矩陣。正式資料、權重與
+模態數均由設定檔控制；目前後灣正式設定求取 100 組，圖面預設只畫前 20 組，因此後續可
+以重繪直接產出的第 21–30 組，不必重新讀取兩年資料或重建加權矩陣。
+為避免在答辯時將「原始物理值」誤當成「送入 SVD 的加權距平」，白板可依下列順序畫出。
+
+```text
+步驟 1：對每個速度深度建立最終有效格點清單（不是把 X/NaN 填成 0）
+
+  C_eta                 : eta 可用的表層格點
+  C_0, C_10, ..., C_50  : 各速度深度可用的格點；每層可不同
+
+  陸地、海床以下、固定深度無上下 zcor 包夾、或未通過有效率門檻的位置
+  --> 不配置 feature row；日後畫圖時保留 NaN / X。
+
+
+步驟 2：在單一 UTC 時刻 t_j 依指定排列取物理狀態欄向量 q_phys(t_j)
+
+                     ┌ eta(c_1,t_j)                 c_1 ∈ C_eta
+                     │ eta(c_2,t_j)
+                     │ ...
+                     │ eta(c_Neta,t_j)               eta 只放一次
+                     ├ u(surface,c_1,t_j)            c_1 ∈ C_0
+                     │ ...
+                     │ u(50m,c_N50,t_j)              所有深度的 u 連續排列
+ q_phys(t_j) =       ├ v(surface,c_1,t_j)            c_1 ∈ C_0
+                     │ ...
+                     │ v(50m,c_N50,t_j)              同樣的深度／格點順序排列
+                     └
+
+
+步驟 3：先逐 feature 去時間平均、再加上既定物理權重與 RMS 標準化
+
+  a(t_j)[p] = scale[p] × ( q_phys(t_j)[p] - mean[p] )
+
+  u/v 的 scale = sqrt(cell_area × 該層垂向權重) / velocity_RMS
+  eta 的 scale = sqrt(cell_area) / eta_RMS
+
+  這個 a(t_j) 才是 SVD 的欄向量；mean 與 scale 會另存，所以可還原物理單位。
+
+
+步驟 4：將所有 UTC 時間欄並排，得到指定排列版加權距平矩陣 A
+
+                  time →       t_1       t_2       t_3       ...     t_T
+                             ┌───────────────────────────────────────────────┐
+  eta rows                   │ a_eta(1,t_1)  a_eta(1,t_2)  a_eta(1,t_3)  ... │
+  (eta only once)            │       ...            ...            ...       │
+  ─────────────────────────  ├───────────────────────────────────────────────┤
+  u rows: surface,10,...50m  │ a_u(surface,1,t_1)                  ...        │
+                             │       ...                                      │
+  ─────────────────────────  ├───────────────────────────────────────────────┤
+  v rows: surface,10,...50m  │ a_v(surface,1,t_1)                  ...        │
+                             │       ...                                      │
+                             └───────────────────────────────────────────────┘
+                                      A.shape = (F features, T retained times)
+
+
+步驟 5：直接求設定模態數的奇異三元組（後灣目前設定為 100 組）
+
+  A_r = U_A[:,1:r] × diag(sigma_1,...,sigma_r) × Vh_A[1:r,:]
+
+  r = svd.requested_mode_count；U_A 的每一欄是一個聯合空間模態，列順序就是 eta -> all u -> all v。
+  PC(r,t) = sigma_r × Vh_A(r,t)：第 r 個模態的時間係數。圖面只由 figures.mode_count 決定。
+
+
+步驟 6：由右側的 compact U_A 欄向量畫回左側六層圖
+
+  第 r 模態的第 p 個物理 loading
+       e_r[p] = U_A[p,r] / scale[p]
+
+  feature_index_map.csv 的第 p 列
+       (component, depth, grid_row, grid_col)
+       eta, --,  i, j  --> eta_map[r,i,j] = e_r[p]
+       u,   20m,i, j  --> u_map[r,20m,i,j] = e_r[p]
+       v,   20m,i, j  --> v_map[r,20m,i,j] = e_r[p]
+
+  沒有 feature row 的位置 --> 保持 NaN / 畫 X，不是 0。
+```
+
+對於舊版已發布、仍使用 `X=(time, feature)` 的成果，令 `P` 為把舊列順序換成指定排列的
+置換矩陣，則
+
+$$
+A=P X^T,\qquad X_{20}=U_X\Sigma_{20}V_{h,X}
+\quad\Longrightarrow\quad
+A_{20}=(P V_X)\Sigma_{20}U_X^T .
+$$
+
+因此 `U_A=P V_X`、`Vh_A=U_X.T`。這是舊成果的精確轉置／重排，不重新讀取兩年
+`ocm_surface/ocm_native`、不建立協方差矩陣、也不以另一個近似演算法取代直接 SVD。新版本
+正式求解器已直接產生 `A`，因此不需要再做這個相容性轉換。
+
+已完成的水柱 run 可用下列只讀入口發布指定排列成果；它會雜湊來源檔、拒絕覆寫，並將由
+`U_A` 回填的圖場同來源模式逐值 round-trip 比較（門檻 `1e-12`）：
+
+```bash
+SOURCE_RUN=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-08-06/water_column_svd/houwan_nmmba_flow_domain_surface_z010_020_030_040_050_u_v_eta_available_2024_2025_v1
+HOST_LAYOUT_ROOT=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-08-07_host_layout
+
+uv run --frozen --no-sync --python 3.12.13 ocm-svd-water-column-host-layout \
+  --run-dir "$SOURCE_RUN" \
+  --output-root "$HOST_LAYOUT_ROOT"
+```
+
+```text
+water_column_svd_host_layout/<source-analysis-label>/
+└── eta_u_all_depths_v_all_depths_feature_by_time_v1/
+    ├── left_singular_vectors_weighted.npy      # U_A, (feature, r)
+    ├── right_singular_vectors_time.npy         # Vh_A, (r, time)
+    ├── singular_values.npy                      # Sigma, (r,)
+    ├── pc.npy                                   # Sigma × Vh_A, (r, time)
+    ├── feature_scale.npy / feature_mean_physical.npy
+    ├── feature_index_map.csv                    # 每一矩陣列 -> eta/u/v、深度、格點、經緯度
+    ├── roundtrip_mode_u_mps_per_raw_pc.npy     # 由 U_A 回填，(20, 6, lat, lon)
+    ├── roundtrip_mode_v_mps_per_raw_pc.npy     # 由 U_A 回填，(20, 6, lat, lon)
+    ├── roundtrip_mode_eta_m_per_raw_pc.npy     # 由 U_A 回填，(20, lat, lon)
+    └── metadata.json                            # 矩陣式、來源雜湊、殘差對應、round-trip 證據
+```
+
+### 正式成果的兩層 t1 展示欄
+
+若答辯時只需要展示兩個正式深度層，可由已發布水柱 run 的 `mean`、physical mode 與第一個
+正式 PC 只讀建立一欄；預設選正式表層與 10 m 的**完整 102×152 格網及其有效遮罩**，不使用
+toy 數值，也不把正式格網裁成 3×3：
+
+```bash
+uv run python3 scripts/extract_formal_t1_whiteboard_demo.py \
+  --run-dir /home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-08-06/water_column_svd/houwan_nmmba_flow_domain_surface_z010_020_030_040_050_u_v_eta_available_2024_2025_v1 \
+  --output-dir work/formal_t1_two_layers
+```
+
+這個展示欄的物理值是正式前 20 模態在第一個保留 UTC 時次的 rank-20 重建：
+`mean + physical_mode × PC(t1)`。列順序為 `eta → u(surface) → u(10m) → v(surface) →
+v(10m)`，回填陣列仍維持正式 `102×152` 格網；`feature_index_map.csv` 只列入正式 mask
+為 true 的格點。單欄 SVD 只有一個非零奇異值，故這是正式結果的排列／回填展示，不取代完整
+兩年 20 模態的正式成果，也不宣稱是未截斷原始 t1 觀測欄。
+
+五個 `roundtrip_*_physical_t1_rank20.npy` 已是可直接繪圖的完整物理格網。若要以正式
+經緯度畫出五張單場圖及表層／10 m 兩張 u/v 向量圖，可執行
+[`scripts/plot_formal_t1_two_layers.py`](scripts/plot_formal_t1_two_layers.py)；詳細輸入、
+輸出檔名與 `NaN` 遮罩規則見 [`work/formal_t1_two_layers/README.md`](work/formal_t1_two_layers/README.md)。
 
 ## 六個分析單元與跨專案資料契約
 
@@ -17,14 +226,14 @@ provenance」的唯一權威；本專案只依其版本化定義讀取資料、�
 每一份本專案設定都保存該檔案的 SHA-256；分析邊界、核定狀態或 coverage 門檻一旦更改，
 必須在前處理專案建立新版本，不能只在 SVD 專案局部修改 bbox。
 
-| 主要 SVD 分析單元 | 狀態 | flow domain | 2025 設定 |
+| 主要 SVD 分析單元 | 狀態 | flow domain | 2024–2025 正式設定 |
 | --- | --- | --- | --- |
-| 龜山島西側海域 | candidate | `northeast_taiwan_common_cache_v3` | `guishan_surface_svd_2025.json` |
-| 貢寮海域 | candidate | `northeast_taiwan_common_cache_v3` | `gongliao_surface_svd_2025.json` |
-| 新竹沿岸 | candidate | `hsinchu_cache_v3` | `hsinchu_surface_svd_2025.json` |
-| 後灣／海生館 | candidate | `houwan_nmmba_cache_v3` | `houwan_nmmba_surface_svd_2025.json` |
-| 北竿海域 | approved | `lienchiang_common_cache_v3` | `beigan_surface_svd_2025.json` |
-| 南竿海域 | approved | `lienchiang_common_cache_v3` | `nangan_surface_svd_2025.json` |
+| 龜山島西側海域 | candidate | `northeast_taiwan_common_cache_v3` | `guishan_surface_svd_available_2024_2025.json` |
+| 貢寮海域 | candidate | `northeast_taiwan_common_cache_v3` | `gongliao_surface_svd_available_2024_2025.json` |
+| 新竹沿岸 | candidate | `hsinchu_cache_v3` | `hsinchu_surface_svd_available_2024_2025.json` |
+| 後灣／海生館 | candidate | `houwan_nmmba_cache_v3` | `houwan_nmmba_surface_svd_available_2024_2025.json` |
+| 北竿海域 | approved | `lienchiang_common_cache_v3` | `beigan_surface_svd_available_2024_2025.json` |
+| 南竿海域 | approved | `lienchiang_common_cache_v3` | `nangan_surface_svd_available_2024_2025.json` |
 
 北竿與南竿是兩個核定的主要 SVD 分析區。舊有北竿 3 個、南竿 4 個極小候選框保留
 為各主區內的附屬局地位置／受體／局地統計視窗，**不**各自產生五個「空間模態」成果。
@@ -42,7 +251,7 @@ ocm_surface/
     │   ├── cell_area_m2.npy
     │   └── mask_static.npy
     └── months/
-        └── 202501/
+        └── <YYYYMM>/
             ├── metadata.json
             ├── time_utc_ns.npy
             ├── u_surface_mps.npy
@@ -56,9 +265,10 @@ ocm_surface/
 向量。輸出中的 `analysis_geometry_mask.npy`、`valid_mask.npy` 與 `metadata.json` 可分別
 檢查區域邊界、最終共同有效海域與上游設定雜湊。
 
-貢寮設定是 [configs/gongliao_surface_svd_2025.json](/Users/mustlab/Workspace/OCM-SVD-Analysis/configs/gongliao_surface_svd_2025.json)，固定採用
-`[121.91, 122.06, 25.00, 25.15]`，並要求 2025 年 1–12 月皆為 `status=ready`、
-`cache_kind=standard_month`。前四區仍是 candidate，成果會標記為 `candidate_pilot`；北竿
+貢寮正式設定是
+[`configs/gongliao_surface_svd_available_2024_2025.json`](configs/gongliao_surface_svd_available_2024_2025.json)，固定採用
+`[121.91, 122.06, 25.00, 25.15]`，並依雙年度全部可得月份的實際 `status` 與
+`cache_kind` 建立時間軸。前四區仍是 candidate，成果會標記為 `candidate_pilot`；北竿
 與南竿的核定區則在完全通過資料品質檢查時標為 `analysis_ready`。
 
 ## 新增區域：設定檔從哪裡來、如何建立
@@ -89,7 +299,7 @@ ocm_surface/
    `shasum -a 256 OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json`，把完整小寫
    雜湊填入新 SVD JSON 的 `source_analysis_units_config_sha256`。
 4. **從相近區域複製 SVD 設定，再逐欄更新。** 新檔可命名為
-   `configs/<region>_surface_svd_<year>.json`；更新 `analysis_label` 與 `purpose`，並把 `focus`
+   `configs/<region>_surface_svd_<years>.json`；更新 `analysis_label` 與 `purpose`，並把 `focus`
    內的 ID、名稱、狀態、flow domain、bbox、anchor、上游設定路徑與 SHA-256 全部改為第 1–3
    步的值。`minimum_static_ocean_cells` 必須至少符合新分析單元的 coverage 設計；其他缺值
    門檻、年份、模式數與 CPU 配額亦須依資料量與 SERVER 資源重新確認。
@@ -133,247 +343,148 @@ uv sync --frozen --python 3.12.13 --managed-python
 export OCM_SURFACE_ROOT=/home/mustlab/data/OCM-Preprocessed-Data/preprocessed/ocm_surface
 export SVD_OUTPUT_ROOT=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results
 
-uv run --frozen --no-sync --python 3.12.13 ocm-svd \
-  --config configs/gongliao_surface_svd_2025.json \
-  --surface-root "$OCM_SURFACE_ROOT" \
-  --output-root "$SVD_OUTPUT_ROOT"
-```
-
-成功後會印出不可覆寫的 run 目錄，例如：
-
-```text
-$SVD_OUTPUT_ROOT/svd/gongliao_surface_u_v_eta_2025_candidate_v3_<hash>/
-```
-
-### 貢寮 2025 年度可得資料設定
-
-SERVER 現有貢寮上游共用快取在 2025 年 3、5、7、11 月包含缺日，合計保留 8,514 個逐時
-樣本（相對全年 8,760 小時為 97.19%），最大來源時間斷點為 50 小時。因原始來源已不可考、
-缺日無法補齊，2025 年度成果應使用
-`configs/gongliao_surface_svd_available_2025.json` 並明確加
-`--allow-partial-months`。這份設定仍只把貢寮
-`[121.91, 122.06, 25.00, 25.15]` focus bbox 的 cell center 納入 SVD，不會分析整個
-東北臺灣共用 flow domain，也不會跨缺日插補：
-
-```bash
-uv run --frozen --no-sync --python 3.12.13 ocm-svd \
-  --config configs/gongliao_surface_svd_available_2025.json \
+uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
+  --batch-config configs/six_regions_surface_svd_available_2024_2025_batch.json \
   --surface-root "$OCM_SURFACE_ROOT" \
   --output-root "$SVD_OUTPUT_ROOT" \
-  --allow-partial-months
+  --no-figures
 ```
 
-此成果是「2025 年全部可得樣本」的貢寮候選框年度模態；簡報與報告必須同時揭露 97.19%
-時數覆蓋率與缺日月份，不可誤稱為 8,760 小時無缺口資料或正式保護區 AOI 結果。原始
-`configs/gongliao_surface_svd_2025.json` 保留作 12 個完整 `standard_month` 的嚴格
-契約，不會為了現有資料回寫或放寬。
+正式雙年度批次會依六個分析單元分別發布不可覆寫的 run 目錄；若需正式圖面，完成數值
+成果驗收後再使用既有 run 進行唯讀重繪，不重新讀取原始 cache 或重跑 SVD。
 
-針對共用東北臺灣快取的 `202507` 前 24 筆時間座標，專案採用預先登錄的 +24 小時時間軸
+```text
+$SVD_OUTPUT_ROOT/svd/<analysis-label-2024_2025>/
+```
+
+### 後灣完整 flow-domain 水柱直接 SVD（本次正式 SERVER 作業）
+
+完整兩年 paired cache 僅留在 SERVER；本機只執行合成資料與一日 trial，不能取代正式 run。
+同步本 repository（含 `uv.lock`）後，先設定 native root，並執行唯一的後灣入口：
+
+```bash
+export OCM_NATIVE_ROOT=/home/mustlab/data/OCM-Preprocessed-Data/preprocessed/ocm_native
+export OCM_SURFACE_ROOT=/home/mustlab/data/OCM-Preprocessed-Data/preprocessed/ocm_surface
+export SVD_OUTPUT_ROOT=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-08-06
+
+uv sync --frozen --python 3.12.13 --managed-python
+./scripts/run_houwan_flow_domain_water_column_svd_available_2024_2025.sh
+```
+
+腳本先執行唯讀 paired preflight，將完整 grid、24 個月 UTC 軸、候選矩陣、可用磁碟與預定
+direct solver 寫入 `logs/*.json`；通過後才建立暫存矩陣並正式求解。正式成果發布為：
+
+若正式 run 在「加權矩陣已完成」之後因 PROPACK、殘差驗證、序列化或圖面問題失敗，程式會把
+`weighted_anomaly_float64.dat`、`solver_resume_checkpoint.npz` 與
+`solver_failure_diagnostic.json` 原子保留於同一 namespace 的隱藏 recovery 目錄。這些是未發布
+工作檔，不能直接當成成果或手動修改；它們會綁定 JSON 設定 hash、完整 canonical UTC 軸與候選
+feature 數，並保存已選欄位布局及完整 candidate feature 有效率 QC 軸。確認失敗日誌的 recovery
+路徑後，可只重試相同的直接 SVD：
+
+```bash
+export SVD_RESUME_PARTIAL="$SVD_OUTPUT_ROOT/water_column_svd/.houwan_nmmba_flow_domain_surface_z010_020_030_040_050_u_v_eta_available_2024_2025_v1.recovery-<uuid>"
+./scripts/run_houwan_flow_domain_water_column_svd_available_2024_2025.sh
+```
+
+續跑仍會重新檢查 paired cache 與 UTC 軸，但不會再讀取兩年 native 3D 資料或改變 mask、權重、
+深度層與 eta 的單一 2D 欄位。若 checkpoint 驗證不通過，必須重新建立矩陣，不能為了省時混用
+不同資料版本。失敗的 CLI stdout/stderr 會保留為 `logs/*.failed.log`，不再因 tmux 結束而遺失
+traceback；成功發布時 recovery scratch、checkpoint 與失敗診斷均會移除。
+
+```text
+$SVD_OUTPUT_ROOT/water_column_svd/
+└── houwan_nmmba_flow_domain_surface_z010_020_030_040_050_u_v_eta_available_2024_2025_v1/
+    ├── mode_u_mps_per_raw_pc.npy        # (mode, velocity_level, lat, lon)
+    ├── mode_v_mps_per_raw_pc.npy        # (mode, velocity_level, lat, lon)
+    ├── mode_eta_m_per_raw_pc.npy        # (mode, lat, lon)，沒有 depth 軸
+    ├── pc.npy                            # (mode, time)，20 條共同 PC
+    ├── metadata.json                     # solver、殘差、遮罩、時間與資源證據
+    └── figures/
+        ├── report/water_column_mode_01_surface_spatial_report.png/.svg
+        ├── report/water_column_mode_01_z_minus_010m_spatial_report.png/.svg
+        ├── report/water_column_mode_01_eta_spatial_report.png/.svg
+        ├── report/water_column_mode_01_pc_report.png/.svg
+        ├── report/water_column_svd_explained_variance_report.png/.svg
+        ├── report/water_column_*_feature_coverage_qc_report.png/.svg
+        ├── REPORT_GUIDE.md
+        └── plot_metadata.json
+```
+
+每一張速度空間**主圖本身**都在右下角以表層圖同款的箭頭、數值與單位內嵌同一 q95 向量參考尺；不再要求使用者從
+`_with_vector_scale` 備用版本選圖。每張圖仍另附同 stem 的 `_vector_scale_transparent`
+透明素材，僅在報告版面必須將比例尺移至圖外時使用。雙行標題與固定色條欄位分離，避免
+長中文模態題名遮擋右側色條。各圖的色階、箭頭尺度、有效格點數、同 mode 的 PC 配對關係
+與文獻圖面慣例均保存於 `figures/plot_metadata.json`；因此報告可單獨取用任一深度圖，不需
+先裁切複合圖。
+
+水柱圖面採「數值上聯合、圖面上拆分」：六層速度、唯一 eta 與共同 PC 仍是同一次
+聯合 SVD 的結果，但不再產生 `mode_XX.png`、2×4 coverage 或 3×3 複合畫布。每個模態
+的六層速度圖、eta 圖與 PC 圖各自為可獨立引用的正式圖檔；解釋變異圖與七張深度／eta
+coverage QC 圖也各自輸出。此組織方式參考 EOF/PC 空間型態與時間係數的配對概念，以及
+三維海洋研究中水平與垂向視角分開檢視的做法；完整來源與引用界線見
+[`docs/svd_figure_reference_log.md`](docs/svd_figure_reference_log.md)，其中包含
+[Lee et al. (2013) Ocean Dynamics](https://link.springer.com/article/10.1007/s10236-013-0643-z)
+與本次提供的其他文獻。`plot_metadata.json` 會記錄 `logical_figure_count=168`、圖面
+schema、同 mode 配對、eta 不重複進入垂向層的限制，以及所有衍生比例尺資產。
+
+#### 已有完整水柱 SVD 結果：只讀陣列重繪獨立圖面
+
+若既有 `water_column_svd/<analysis_label>/` 已保存 `regression_u_mps_per_pc_std.npy`、
+`regression_v_mps_per_pc_std.npy`、`regression_eta_m_per_pc_std.npy`、
+`pc_standardized.npy`、`explained_variance.npy`、兩種 feature mask，以及 `lon/lat/time`
+座標，圖面修正**不可**再次執行 `run_houwan_flow_domain_water_column_svd_available_2024_2025.sh`。
+應以 `ocm-svd-water-column-replot` 建立另一個 immutable figure bundle；此入口沒有
+native/surface root 參數，僅以 `numpy.memmap` 唯讀既有水柱 SVD 陣列，且不會重新建立加權
+矩陣、垂向內插、正規化、固定模態符號或呼叫直接 SVD solver。
+
+SERVER 上的舊版成果是 20 模態、時間×feature 方向的歷史 run；它保留作為相容性與回溯
+對照，不代表目前正式設定。現行正式水柱成果採研究需求指定排列
+`A=(feature,time)`，求取 100 個模態且預設繪製 20 個；其完整陣列包含 17,052 個共同 UTC
+時次、`(100, 6, 102, 152)` 的 u/v 模態場與 `(100, 102, 152)` 的唯一 eta 模態場。
+後續可對同一成果唯讀重繪第 21–30 或其它已計算模態：
+
+```bash
+cd /home/mustlab/Workspace/OCM-SVD-Analysis
+uv sync --frozen --python 3.12.13 --managed-python
+
+SOURCE_RUN=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-08-07_water_column_host100/water_column_svd/houwan_nmmba_flow_domain_surface_z010_020_030_040_050_u_v_eta_available_2024_2025_v1
+BUNDLE_ROOT=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-08-07_water_column_figure_refresh
+
+uv run --frozen --no-sync --python 3.12.13 ocm-svd-water-column-replot \
+  --run-dir "$SOURCE_RUN" \
+  --output-root "$BUNDLE_ROOT" \
+  --config configs/houwan_nmmba_flow_domain_water_column_svd_available_2024_2025.json
+```
+
+成功後會發布至
+`$BUNDLE_ROOT/water_column_svd_figure_bundles/houwan_nmmba_flow_domain_surface_z010_020_030_040_050_u_v_eta_available_2024_2025_v1/academic_report_ready_water_column_independent_v1/`。
+此路徑與既有科學 run 分離，來源的 `.npy`、`metadata.json`、`config.json`、舊圖與上游
+cache 均不會被覆寫；程式在繪圖前後都雜湊來源檔，若有任何來源改變即拒絕發布。輸出包含
+168 個邏輯獨立圖面（預設 20 個模態各六張速度圖、一張 eta 圖、一張 PC 圖，外加一張 scree 與
+七張 coverage QC 圖），以 PNG 與 SVG 提供，並另附向量比例尺衍生資產。已存在同一 bundle
+版本時，程式會拒絕覆寫，請改用新的 `BUNDLE_ROOT` 或在圖面規格確實變更後提升 style 版本。
+
+若 `metadata.json` 顯示 `direct_propack_streaming`，它仍是針對同一加權矩陣的直接 SVD；
+`direct_dense_lapack` 與此策略只有記憶體存取方式不同。兩者都必須有設定要求的模式數、有限正奇異
+值、通過殘差／正交性檢查，並且 `mode_eta_*` 維度只能是 `(mode, lat, lon)`。不要在正式命令
+加 `--allow-trial` 或 `--no-figures`。
+
+雙年度資料中的共用東北臺灣快取，其 `202507` 前 24 筆時間座標採用預先登錄的 +24 小時時間軸
 正規化假設：該段原始快取標籤為 `2025-06-30T01:00Z` 至 `2025-07-01T00:00Z`，而相鄰日檔
 命名與後續時序顯示跨月銜接存在不一致。這是專案端為維持分析時間軸內部一致性所作的處置，
 並非原始 NetCDF 資料提供者的更正或確認。`input.known_time_axis_repairs` 是既有設定欄位名稱；
 它只在原始起訖時間完全相符時，於分析記憶體內將前 24 筆時間標籤平移 24 小時。此處置不覆寫
 上游 `.npy`、不重排樣本，也不改變 u/v/eta/valid 數值；假設內容與套用筆數會寫入成果 metadata。
 
-### 貢寮固定深度 `u(z)/v(z)/eta` 垂向比較 family
-
-固定深度分析不是把 SCHISM layer index 5、10、20 當成水深，也不是替每個深度建立另一個
-`eta`。設定
-[`configs/gongliao_fixed_depth_svd_available_2025.json`](/Users/mustlab/Workspace/OCM-SVD-Analysis/configs/gongliao_fixed_depth_svd_available_2025.json)
-定義四個可比較層位：
-
-- 共同遮罩表層參考：`u_surface/v_surface/eta`；
-- 固定 `z=-5 m`：`u(z=-5)/v(z=-5)/eta`；
-- 固定 `z=-10 m`：`u(z=-10)/v(z=-10)/eta`；
-- 固定 `z=-20 m`：`u(z=-20)/v(z=-20)/eta`。
-
-其中只有 `u/v` 使用 paired native cache 的逐時 `zcor(time,node,layer)` 垂向內插。
-`eta` 直接讀取同月
-`ocm_surface/northeast_taiwan_common_cache_v3/months/<YYYYMM>/eta_m.npy`；它源自
-SCHISM `elev(time,node) [m]` 經既有 Delaunay 重心水平內插，沒有垂向維度。固定深度
-管線會要求 surface/native `time_utc_ns.npy` 逐值相同，並拒絕把表層
-`valid_mask_surface.npy` 直接當成深層遮罩。
-
-為了讓模態差異可歸因於垂向流場，而不是不同格點或時間母體，這個 family 固定採
-`intersection_with_surface`：
-
-1. 每個固定深度只在 `zcor/u/v` 都有限且有上下包夾層時線性內插；不做單側、海床以下
-   或海面以上外插。
-2. 每個層位的三變數有效條件都是 `finite(u) AND finite(v) AND finite(eta)`。
-3. 表層、-5、-10、-20 m 都達到年度有效率門檻的格點才進入 `shared_valid_mask.npy`。
-4. 短缺值處理後，四個層位都完整的時次才進入各自 SVD。
-5. 四組 SVD 沿用相同面積權重、u/v 與 eta RMS 正規化、模式數和 sign anchor。
-
-這個共同遮罩表層參考不覆寫既有 272 格完整表層 run。完整表層 run 用來描述全部可用
-表層海域；family 中的表層參考只用來和三個固定深度作同母體比較。
-
-在 SERVER 執行：
-
-```bash
-export OCM_NATIVE_ROOT=/home/mustlab/data/OCM-Preprocessed-Data/preprocessed/ocm_native
-export OCM_SURFACE_ROOT=/home/mustlab/data/OCM-Preprocessed-Data/preprocessed/ocm_surface
-export SVD_OUTPUT_ROOT=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-07-31
-
-uv run --frozen --no-sync --python 3.12.13 ocm-svd-fixed-depth \
-  --config configs/gongliao_fixed_depth_svd_available_2025.json \
-  --native-root "$OCM_NATIVE_ROOT" \
-  --surface-root "$OCM_SURFACE_ROOT" \
-  --output-root "$SVD_OUTPUT_ROOT" \
-  --allow-partial-months
-```
-
-輸出採 family 結構，整組完成後才原子發布：
-
-```text
-$SVD_OUTPUT_ROOT/fixed_depth_svd/<analysis_label_vN>/
-├── shared_valid_mask.npy
-├── time_utc_ns.npy
-├── metadata.json
-└── levels/
-    ├── surface_reference/
-    ├── z_minus_005p00m/
-    ├── z_minus_010p00m/
-    └── z_minus_020p00m/
-```
-
-每個固定深度 level 另存 `vertical_bracket_span_m.npy`，表示逐時、逐格水平內插後的上下
-`zcor` 包夾距離。這是垂向解析度 QC，不是速度或 layer 厚度；無包夾層處為 NaN。
-詳細方法、`eta` 來源鏈、遮罩語意與正式報告限制見
-[`docs/gongliao_2025_fixed_depth_svd_method.md`](/Users/mustlab/Workspace/OCM-SVD-Analysis/docs/gongliao_2025_fixed_depth_svd_method.md)。
-
-#### 2026-07-31 全年 SERVER 實跑結果
-
-上述命令已用 uv 管理的 Python 3.12.13 完成 2025 全部可得資料，不是 Anaconda
-Python。可讀、不可覆寫的固定深度版本 ID 為
-`gongliao_focus_bbox_surface_reference_fixed_z_005_010_020_u_v_eta_available_2025_v1`；
-成果已從 SERVER 下載至
-[`outputs/server_results/2026-07-31/fixed_depth_svd/gongliao_focus_bbox_surface_reference_fixed_z_005_010_020_u_v_eta_available_2025_v1`](/Users/mustlab/Workspace/OCM-SVD-Analysis/outputs/server_results/2026-07-31/fixed_depth_svd/gongliao_focus_bbox_surface_reference_fixed_z_005_010_020_u_v_eta_available_2025_v1)。
-
-固定深度科學成果與完整表層成果採獨立父目錄及獨立分析版本：前者位於
-`fixed_depth_svd/`，後者位於 `svd/`，不互相覆寫。固定深度 `analysis_label` 必須以
-`_vN` 結尾，完整 64 字元科學內容身分存於 `metadata.json >
-science_provenance_sha256`；設定或來源若改變，必須提升版本號，目錄尾端不再附加短 hash。
-
-實跑品管與資源紀錄如下：
-
-- 8,514 個來源可得時次中，四層共同保留 8,442 個（99.15%）；共同海域為 206 格。
-- 四層的 `time_utc_ns.npy`、`shared_valid_mask.npy` 與 `mean_eta_m.npy` 逐值完全相同；
-  因此深度間差異來自配對的流速場，不是不同 `eta` 或不同分析母體。
-- 總牆鐘時間 1:57:54，峰值 RSS 約 15.13 GiB，未使用 swap。
-- paired native/surface 月檔讀取與垂向內插耗時 7,030.42 秒；共同遮罩處理 1.43 秒；
-  四組 SVD 求解與場量推導合計僅 1.82 秒。
-- 整理後的科學 family 共 91 個檔案、111.12 MiB，含 85 個 NPY 與 6 個 JSON；舊式
-  內嵌圖面已移出，正式圖只存在獨立 figure bundle，因此不會和完整表層成果混用。
-  大型 paired native cache 仍不需要搬到本機。
-
-效能瓶頸不是 SVD，而是從 NFS 上的 native 大陣列讀取 712 個分散 source nodes。
-這些節點只占來源軸約 1.05%，但索引密度約 7%，分成 291 個不連續區段，會放大 mmap
-分頁讀取。若後續要縮短時間，應優先把 focus 所需 source-node 連續區段預裁成小型
-年度／月快取；增加 SVD 線性代數執行緒幾乎不會改善這次約兩小時的總耗時。
-
-繪圖器會依主機實際安裝字型依序選擇 macOS 繁中字型、Ubuntu 常見的
-`Noto Sans CJK TC`／`Noto Serif CJK TC`，最後才退回 `DejaVu Sans`。因此 SERVER 已安裝
-Noto CJK 時，繁中標題不需另行下載字型，也不會把系統字型複製進成果目錄。
-
-#### 固定深度成果只重繪圖面
-
-已完成的固定深度 family 若只需補比例尺或 coverage 圖，不應再次讀取大型 paired cache、
-垂向內插或求解 SVD。重繪器以唯讀 memory-map 使用既有四層平均場、回歸模態、PC、
-時間軸、逐格有效率及共同遮罩：
-
-```bash
-uv run --frozen --no-sync --python 3.12.13 ocm-svd-fixed-depth-replot \
-  --run-dir "$SVD_OUTPUT_ROOT/fixed_depth_svd/<analysis_label_vN>" \
-  --output-root "$SVD_OUTPUT_ROOT"
-```
-
-圖包發布至
-`fixed_depth_svd_figure_bundles/<analysis_label_vN>/<figure-style>/`，來源 family
-不新增圖檔、不改 metadata，也不複製科學陣列。同一 style 已存在時會拒絕覆寫；視覺規格
-若再改變，必須先提升 `figures.style`。
-
-每個層位的平均場及空間模態都同時提供不含比例尺的標準圖、
-`*_vector_scale_transparent.*` 透明後製素材，以及可直接放報告的
-`*_with_vector_scale.*` 完整圖。固定深度模態標題另明示其 u/v 深度；所有層位的 `eta`
-仍是同時次的唯一自由水面高度。
-
-2026-07-31 的貢寮 v6 圖包已建立於
-[`outputs/server_results/2026-07-31/fixed_depth_svd_figure_bundles/gongliao_focus_bbox_surface_reference_fixed_z_005_010_020_u_v_eta_available_2025_v1/academic_report_ready_v6`](/Users/mustlab/Workspace/OCM-SVD-Analysis/outputs/server_results/2026-07-31/fixed_depth_svd_figure_bundles/gongliao_focus_bbox_surface_reference_fixed_z_005_010_020_u_v_eta_available_2025_v1/academic_report_ready_v6)。
-其中 `fixed_depth_shared_coverage_qc_report.*` 顯示表層、-5 m、-10 m 各有
-272/272 格達到 95% 年度有效率門檻，-20 m 為 206/272 格，故四層共同交集為 206 格、
-排除 66 格。這 66 格在科學空間圖中維持缺值，不補值、不外插；QC 圖以橙色說明其排除
-來源，不能解讀成陸地。本機只讀既有陣列重繪共耗時約 19.53 秒。
-
-### 六區 2024–2025 固定深度 SVD：獨立 family 與分組依序執行
-
-六區雙年度固定深度成果使用
-[`configs/six_regions_fixed_depth_svd_available_2024_2025_batch.json`](./configs/six_regions_fixed_depth_svd_available_2024_2025_batch.json)，
-這不是表層 [`six_regions_surface_svd_available_2024_2025_batch.json`](./configs/six_regions_surface_svd_available_2024_2025_batch.json)
-的替代版本，也不能彼此交叉使用。固定深度 batch 僅接受六份
-`*_fixed_depth_svd_available_2024_2025.json`，且強制鎖定以下兩個獨立命名空間：
-
-```text
-$SVD_OUTPUT_ROOT/fixed_depth_svd/<analysis_label_vN>/
-$SVD_OUTPUT_ROOT/fixed_depth_svd_figure_bundles/<analysis_label_vN>/academic_report_ready_v8/
-```
-
-它絕不建立、讀取、覆寫或重繪 `$SVD_OUTPUT_ROOT/svd/` 與
-`$SVD_OUTPUT_ROOT/svd_figure_bundles/` 的完整表層產品。每一 family 仍包含共同遮罩表層
-參考、`z=-5/-10/-20 m` 的 `u/v`、同時次唯一 `eta`、逐時 `vertical_bracket_span_m` 與
-四層共同時間交集；圖面只能在科學 family 發布後由 fixed-depth replot 建立。
-
-六區使用「2024–2025 全部可得 paired native/surface 樣本」契約：可由 CLI 明確接受
-`standard_partial_month`，不跨來源斷點補值，並把實際缺口保留於 metadata。跨月 UTC 倒序或
-重複時，僅在設定明確指定 `sort_and_deduplicate_prefer_last` 時，以同一組索引同步排序／
-去重所有深度的 `u/v/eta`、valid mask 和 bracket span；固定深度 metadata 的
-`paired_input_time_axis` 會完整記錄影響。龜山與貢寮對 2025-07 採用預先登錄的時間軸
-正規化假設；此為專案端處置，並非資料提供者確認，且不修改任何 native/surface 數值。
-
-正式 SERVER 必須先執行 paired 預檢；它只讀 metadata、time 軸、grid 對應與陣列 header，
-不建立成果目錄：
-
-```bash
-export OCM_NATIVE_ROOT=/home/mustlab/data/OCM-Preprocessed-Data/preprocessed/ocm_native
-export OCM_SURFACE_ROOT=/home/mustlab/data/OCM-Preprocessed-Data/preprocessed/ocm_surface
-export SVD_OUTPUT_ROOT=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-08-04
-
-./scripts/preflight_fixed_depth_svd_available_2024_2025.sh
-```
-
-預檢會先以實際檔案 SHA-256 與逐區 `flow_domain_id`、cell-center AOI、anchor、核定狀態
-及附屬局地位置，驗證六份固定深度設定均與前處理分析單元契約一致；任一項不符即停止，
-不開始讀取 `hvel/zcor`。預設讀取相鄰 repository 的
-`../OCM-Data-Preprocessing/configs/ocm_svd_analysis_units_v1.json`；若 SERVER 採不同佈署
-位置，必須先設定 `OCM_ANALYSIS_UNITS_CONFIG=/absolute/path/to/ocm_svd_analysis_units_v1.json`。
-
-預檢六區均為 `OK` 後，以固定深度專用 batch 執行：
-
-```bash
-./scripts/run_fixed_depth_svd_batch_available_2024_2025.sh
-```
-
-批次分成四個「執行組」並依序處理：第一組為龜山＋新竹，第二組為貢寮＋後灣／海生館，
-第三組為北竿，第四組為南竿。同一執行組禁止使用相同資料區域，因此龜山／貢寮與北竿／
-南竿不會同時對同一 native cache 做分散節點讀取；同時最多兩區、每區兩個 I/O worker 與
-四個 BLAS threads。若作業中斷，先檢查已發布 family，再以 `FIXED_DEPTH_SKIP_EXISTING=1`
-重跑同一入口；此旗標只跳過已原子發布的
-`fixed_depth_svd/` run，絕不覆寫或引用表層成果。
-
-全部科學 family 通過驗收後，才建立圖包：
-
-```bash
-./scripts/replot_six_regions_fixed_depth_available_2024_2025.sh
-```
-
-詳細的輸入契約、分組理由、成果結構、驗收門檻與研究限制見
-[`docs/six_regions_2024_2025_fixed_depth_svd_method.md`](./docs/six_regions_2024_2025_fixed_depth_svd_method.md)。
+目前 repository 只維護表層 SVD 與完整 flow-domain 水柱直接 SVD；舊的垂向比較 family 已自
+原始碼、設定、CLI、測試與成果目錄移除，不再作為可重現產品。
 
 ## 平行化執行
 
 單區設定已啟用兩段不重疊的平行化：
 
 - `parallel_execution.io_workers=4`：最多四個 worker 同時以 memory-map 讀取不同月份的
-  focus bbox 小窗；主流程仍依 2025-01 至 2025-12 排序串接，因此平行完成順序不會改變
+  focus bbox 小窗；主流程仍依 2024-01 至 2025-12 排序串接，因此平行完成順序不會改變
   SVD 時間軸或數值結果。
 - `parallel_execution.linear_algebra_threads=4`：I/O worker 結束後，透過 `threadpoolctl`
   限定 NumPy 背後的 BLAS，以最多四個 CPU 核心計算協方差、特徵分解、PC 與重建檢查。
@@ -382,38 +493,6 @@ export SVD_OUTPUT_ROOT=/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_resu
 超額使用 SERVER CPU。實際使用數會自動限制到 SERVER 可見 CPU 數量，並寫入每次成果的
 `metadata.json > parallel_execution`。若 SERVER 的共享儲存體因併發讀取變慢，可將
 `io_workers` 降為 2；若排程系統只配置 2 核，應把 `linear_algebra_threads` 設為 2。
-
-### 32 核 SERVER：六區並行批次
-
-[`configs/six_regions_surface_svd_2025_batch.json`](./configs/six_regions_surface_svd_2025_batch.json)
-是六區 2025 的受控並行計畫：同時執行 6 個獨立 process，每區 4 個 BLAS 執行緒，故密集
-線性代數最高使用 **24 核**；其餘至少 8 核保留給作業系統、memory-map page fault 與網路
-儲存 I/O。每區的 4 個 I/O worker 只在讀月檔階段存在，BLAS 階段不會與同區 I/O worker
-重疊。執行器也會依排程系統實際配置的 CPU 核數自動降低「同時區域數」，不會硬性超額配置。
-
-```bash
-cd /path/to/OCM-SVD-Analysis
-
-export OCM_SURFACE_ROOT=/path/to/preprocessed/ocm_surface
-export SVD_OUTPUT_ROOT=/path/to/derived
-export UV_CACHE_DIR=/tmp/ocm-svd-analysis-uv-cache
-export MPLCONFIGDIR=/tmp/ocm-svd-analysis-matplotlib-cache
-export PYTHONDONTWRITEBYTECODE=1
-
-uv sync --locked
-
-uv run ocm-svd-batch \
-  --batch-config configs/six_regions_surface_svd_2025_batch.json \
-  --surface-root "$OCM_SURFACE_ROOT" \
-  --output-root "$SVD_OUTPUT_ROOT"
-```
-
-搭配指令入口的說明圖表對照 [`docs/ocm-svd-batch.png`](./docs/ocm-svd-batch.png)
-批次結束會輸出單行 JSON，列出六個 analysis unit 的成果路徑；各區仍各自以原子目錄發布。
-若中途失敗，未開始的區域會取消，已完成的區域不刪除；排除原因後重跑時必須明確加
-`--skip-existing` 才會重用不可覆寫的既有成果。JSON 另含整批 `total_elapsed_seconds`
-以及每區 `elapsed_seconds`；每區時間從子 process 進入分析函式前量到 metadata 寫入與
-原子發布完成，可直接比較六區實際完成時間。
 
 ### 效能計時與瓶頸定位
 
@@ -496,13 +575,13 @@ uv run ocm-svd-replot-batch \
 
 如六區都要提供修改過的完整設定，依 `--run-dir` 相同順序重複六次 `--config`。批次輸出
 JSON 保持輸入區域順序，並記錄每區與總耗時，報告組裝程式不必依 worker 完成順序猜測版面。
-建議 2024+2025 正式批次先用 `ocm-svd-batch --no-figures` 完成六個 immutable 科學
+建議 2024–2025 正式批次先用 `ocm-svd-batch --no-figures` 完成六個 immutable 科學
 run，再以此命令產生報告圖；後續修改 renderer 時只重繪 bundles。
 
-### 2024+2025 合併設定
+### 2024–2025 正式設定
 
 讀取器已支援以 `input.years` 依「年份、月份」順序平行讀取 24 個完整月檔。本 repository
-已提供六份不可與既有 2025 設定互相覆寫的雙年度設定，以及其受控平行 batch：
+已提供六份雙年度正式設定，以及其受控平行 batch；各設定與成果均以雙年度版本獨立管理：
 
 - `configs/guishan_surface_svd_2024_2025.json`
 - `configs/gongliao_surface_svd_2024_2025.json`
@@ -542,7 +621,7 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
 `--allow-partial-months`；程式仍會拒絕超過設定值（預設 2 小時）的實際時間缺口。`--allow-trial`
 只用於本機單日 smoke test，輸出會標示 `trial_pilot`。
 
-### 2024+2025 全部可得資料設定
+### 2024–2025 全部可得資料設定
 
 當研究團隊明確決定接受無法補齊的來源缺日，必須使用獨立的 `available_2024_2025` 科學
 契約，不能把嚴格完整月設定加上 `--allow-partial-months` 後直接混用。本版提供六份
@@ -642,7 +721,7 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
 科學 run 完成後，所有報告、圖說與 metadata 解讀都必須以「2024–2025 全部可得樣本」描述，
 並引用每區 `metadata.json > input_surface.source_months`、`time_window` 與
 `parallel_execution` 所記錄的實際來源、覆蓋率與運算條件；還必須揭露
-`input_surface.time_axis_canonicalization`。不得稱為 24 個完整月份或無缺口年度資料。
+`input_surface.time_axis_canonicalization`。不得稱為無缺口的 2024–2025 兩年資料。
 
 ### 已完成科學 run 的 v8 可讀性重繪
 
@@ -664,9 +743,9 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
 `$OCM_SURFACE_ROOT`、不改寫既有 `svd/<run-id>`、不重新求解 SVD；尚未完成的區域標為
 `PENDING`，可待科學 run 發布後以相同指令再次執行。
 
-## SVD 方法
+## 既有表層產品的 SVD 方法（不適用於本次水柱直接 SVD）
 
-### SVD 矩陣建立順序：陸地與 NaN 不可進入矩陣
+### 既有表層矩陣建立順序：陸地與 NaN 不可進入矩陣
 
 ![OCM 海流 SVD 遮罩篩選與矩陣轉換概念圖](docs/figures/ocm_svd_mask_matrix_concept_v1.png)
 
@@ -692,8 +771,7 @@ uv run --frozen --no-sync --python 3.12.13 ocm-svd-batch \
    插補。插補後若任一保留 cell 還有 NaN，整個時間步會移除。故真正送入 SVD 的
    加權矩陣完全不含 NaN，也絕不以 0 補值。
 
-這個規則在單年與 `2024+2025` 合併分析都相同；只有有效率的統計期間改為設定所列的全部
-年月。
+這個規則適用於 2024–2025 雙年度正式分析；有效率統計期間依各設定所列的全部年月計算。
 
 對保留的 `P` 個海域格點與 `N` 個完整時次，狀態向量為：
 
@@ -726,7 +804,7 @@ $$
 X_w = U\Sigma V^T,\qquad PC=\Sigma V^T
 $$
 
-### 程式實際怎麼做：由協方差回復 SVD
+### 既有表層程式實際怎麼做：由協方差回復 SVD
 
 求解位置是
 [`solve_surface_multivariate_svd()`](/Users/mustlab/Workspace/OCM-SVD-Analysis/src/ocm_svd_analysis/surface_multivariate_svd.py)
@@ -761,9 +839,8 @@ RMS 後得到的物理單位 loading。解釋變異率是
 `sigma_k^2=(N-1)lambda_k` 回復 SVD 奇異值，再投影回復 PC。因此求得的空間模態、
 PC 與解釋變異與薄型 SVD 完全等價。」
 
-本版預設計算至前 20 模態，且要求至少可報告前 5 模態。貢寮候選框在本機 1 km trial 中有
-約 253 個海域格點，因此有足夠的空間自由度；正式保留哪些模態仍需在後續加入低通、季節、
-2024/2025 比較、North rule 與 block bootstrap 後決定。
+表層雙年度設定預設計算前 20 模態，且要求至少可報告前 5 模態；正式報告仍應依資料品質、
+低通／季節敏感度、North rule 與 block bootstrap 等分析結果決定實際解讀範圍。
 
 第 5 步的所有插補位置都會寫入 `imputed_mask.npy`，供 SVD 成果審查與不插補敏感度
 分析使用。
@@ -871,10 +948,6 @@ PC 與解釋變異與薄型 SVD 完全等價。」
 [`docs/svd_figure_references.bib`](docs/svd_figure_references.bib)。未來新增或更換
 圖表慣例時，應同步更新這兩份檔案與 `figures/plot_metadata.json` 的來源紀錄。
 
-2025 貢寮實際數值、各模態的安全解讀、可直接使用的簡報順序與講稿，以及「透明 PNG
-為何在深色檢視器看成黑底」的說明，另見
-[`docs/gongliao_2025_svd_report_interpretation.md`](docs/gongliao_2025_svd_report_interpretation.md)。
-
 ## 六區 2024–2025 表層 SVD 學術成果報告
 
 正式成果報告由
@@ -943,9 +1016,33 @@ uv run python3 -m unittest discover -s tests -v
 native/surface cache 驗證固定 z 線性內插、不外插、`eta_m` 原值配對，以及表層與三個
 固定深度共用格點／時間交集。不需要大型 SERVER 資料或 raw NetCDF。
 
+六層聯合直接 SVD 的測試另外同時覆蓋 dense LAPACK 與強制 PROPACK streaming 兩條路徑，
+檢查六個速度層、唯一 eta、設定要求的奇異三元組（正式水柱設定為 100 組、圖面預設前 20 組）、左右殘差，以及每一模態的六張獨立速度圖、
+一張獨立 eta 圖與一張獨立 PC 圖。若要以
+本機保存的後灣單日 paired cache 驗證真實 I/O，使用專為開發設計的 trial 設定：
+
+```bash
+export OCM_NATIVE_ROOT=/Users/mustlab/Workspace/OCM-Data-Preprocessing/preprocessed/trials/202501_days_01/ocm_native
+export OCM_SURFACE_ROOT=/Users/mustlab/Workspace/OCM-Data-Preprocessing/preprocessed/trials/202501_days_01/ocm_surface
+export SVD_OUTPUT_ROOT=/private/tmp/ocm-water-column-trial
+
+UV_CACHE_DIR=/private/tmp/ocm-svd-analysis-uv-cache \
+PYTHONDONTWRITEBYTECODE=1 \
+uv run ocm-svd-water-column \
+  --config configs/houwan_nmmba_flow_domain_water_column_svd_trial_202501_day01.json \
+  --native-root "$OCM_NATIVE_ROOT" \
+  --surface-root "$OCM_SURFACE_ROOT" \
+  --output-root "$SVD_OUTPUT_ROOT" \
+  --allow-trial \
+  --no-figures
+```
+
+此 trial 只驗證完整 flow-domain 的 paired I/O、固定深度內插、矩陣建立及直接 SVD；它僅有
+一天資料，不能用來評估兩年變異結構或替代 SERVER 正式成果。
+
 ## 下一階段
 
-完成 2025 六區資料品質與圖面 review 後，應依同一個六區分析單元版本新增：40 小時低通
-的次潮 SVD、2024+2025 合併、逐年／季節比較與 block bootstrap。2024 資料完成驗收後
-會建立另一組 `2024_2025` 設定，不能把年份直接改進既有 2025 run。AOI polygon 或 cell
-fraction 若再調整，也必須先在前處理專案建立新的分析單元版本，再產生新的 run ID。
+完成 2024–2025 六區資料品質與圖面 review 後，可依同一個六區分析單元版本新增 40 小時
+低通的次潮 SVD、季節比較與 block bootstrap。既有雙年度設定不可直接改寫年份或 AOI；
+AOI polygon 或 cell fraction 若再調整，也必須先在前處理專案建立新的分析單元版本，再產生
+新的 run ID。

@@ -143,7 +143,7 @@ flowchart TD
 3. 轉換 1-based face connectivity 與 bottom index，但不可改變原檔。
 4. 讀取填值為 mask；保存原生 `zcor`、`hvel`、`vertical_velocity`、`elev`、`wetdry_elem` 及必要輔助欄位。
 5. 表層速度取每時每節點最高有效 `zcor` 且 u/v 同時有效的層，不使用固定 `layer=-1` 假設。
-6. 近底速度以最低有效 z 或核定 HAB 內插；固定深度層使用逐時 `zcor` 做單調垂向內插，禁止海底以下外插。
+6. 近底速度以最低有效 z 或核定 HAB 內插；水柱產品的指定水下採樣層使用逐時 `zcor` 做垂向內插，禁止海底以下外插。
 7. 水平內插以原生面拓撲/三角化權重為基準；海岸或濕乾邊界不跨陸地補值。
 8. 產出規則格網時保存每格實際面積、來源三角形、權重、距離與有效 mask，供重現與 QC。
 
@@ -170,7 +170,6 @@ flowchart TD
 | 產品 | 狀態 | 變數/權重 | 解釋範圍 |
 |---|---|---|---|
 | `surface_vector_svd` | 必做 | u、v；格面積權重 | 表層水平流場 |
-| `fixed_depth_vector_svd` | 必做 | u、v；格面積權重 | 核定物理深度 |
 | `hab_vector_svd` | 必做 | u、v；格面積權重 | 近底離床高度 |
 | `full_3d_svd` | 通過資源 pilot 後執行 | u、v、必要時 w；格體積權重 | 整體三維動能結構 |
 | `joint_aoi_svd` | 研究問題需要時 | 東北臺灣等跨區共同 AOI | 比較共同背景模態 |

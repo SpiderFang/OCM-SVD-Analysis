@@ -12,6 +12,9 @@ requires-python = ">=3.11"
 dependencies = [
     "matplotlib>=3.9",
     "numpy>=2.0",
+    # PROPACK 可直接求取大型矩陣的前幾個奇異三元組；它讓完整 flow domain 不必因 RAM
+    # 不足退回協方差特徵分解，並可配合 memory-map 分塊讀取。
+    "scipy>=1.15",
     "threadpoolctl>=3.5",
 ]
 
@@ -19,9 +22,10 @@ dependencies = [
 # CLI 名稱保留 SVD，與研究團隊慣用術語及輸出目錄保持一致。
 ocm-svd = "ocm_svd_analysis.cli:main"
 ocm-svd-batch = "ocm_svd_analysis.batch_cli:main"
-ocm-svd-fixed-depth = "ocm_svd_analysis.fixed_depth_cli:main"
-ocm-svd-fixed-depth-batch = "ocm_svd_analysis.fixed_depth_batch_cli:main"
-ocm-svd-fixed-depth-replot = "ocm_svd_analysis.fixed_depth_replot_cli:main"
+ocm-svd-water-column = "ocm_svd_analysis.water_column_cli:main"
+ocm-svd-water-column-replot = "ocm_svd_analysis.water_column_replot_cli:main"
+# 主持人版入口只對已發布的水柱 SVD 做轉置與特徵重排；不接受 cache 根目錄，也不會重跑 solver。
+ocm-svd-water-column-host-layout = "ocm_svd_analysis.water_column_host_layout_cli:main"
 ocm-svd-replot = "ocm_svd_analysis.replot_cli:main"
 ocm-svd-replot-batch = "ocm_svd_analysis.replot_batch_cli:main"
 
